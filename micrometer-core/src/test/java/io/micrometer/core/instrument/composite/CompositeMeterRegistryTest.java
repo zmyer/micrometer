@@ -19,11 +19,13 @@ import io.micrometer.core.Issue;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.config.NamingConvention;
-import io.micrometer.core.instrument.histogram.pause.ClockDriftPauseDetector;
+import io.micrometer.core.instrument.distribution.pause.ClockDriftPauseDetector;
 import io.micrometer.core.instrument.simple.SimpleConfig;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
@@ -32,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.emptyList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * @author Jon Schneider
@@ -137,7 +140,7 @@ class CompositeMeterRegistryTest {
         composite.counter("counter").increment();
 
         simple.get("counter").tags("region", "us-east-1", "stack", "test",
-            "instance", "local").counter();
+                "instance", "local").counter();
     }
 
     @DisplayName("function timer base units are delegated to registries in the composite")
@@ -147,7 +150,7 @@ class CompositeMeterRegistryTest {
         Object o = new Object();
 
         composite.more().timer("function.timer", emptyList(),
-            o, o2 -> 1, o2 -> 1, TimeUnit.MILLISECONDS);
+                o, o2 -> 1, o2 -> 1, TimeUnit.MILLISECONDS);
 
         FunctionTimer functionTimer = simple.get("function.timer").functionTimer();
         assertThat(functionTimer.count()).isEqualTo(1);
@@ -161,7 +164,7 @@ class CompositeMeterRegistryTest {
         CompositeMeterRegistry compositeMeterRegistry = new CompositeMeterRegistry();
 
         FunctionCounter.builder("foo", 1L, x -> x)
-            .register(compositeMeterRegistry);
+                .register(compositeMeterRegistry);
 
         compositeMeterRegistry.add(registry);
     }
@@ -191,10 +194,10 @@ class CompositeMeterRegistryTest {
     void histogramConfigDefaultIsNotAffectedByComposite() {
         composite.add(simple);
 
-        // the histogramExpiry on this timer is determined by the simple registry's default histogram config
+        // the expiry on this timer is determined by the simple registry's default histogram config
         Timer t = Timer.builder("my.timer")
-            .histogramBufferLength(1)
-            .register(composite);
+                .distributionStatisticBufferLength(1)
+                .register(composite);
 
         t.record(1, TimeUnit.SECONDS);
         assertThat(t.max(TimeUnit.SECONDS)).isEqualTo(1.0);
@@ -218,5 +221,81 @@ class CompositeMeterRegistryTest {
 
         composite.timer("my.timer");
         assertThat(count.getCount()).isEqualTo(0);
+    }
+
+    @Issue("#546")
+    @Test
+    void metricsOnlyUpdatedOnceWhenChildIsPresentInCompositeHierarchyTwice() {
+        composite.add(simple);
+
+        CompositeMeterRegistry nested = new CompositeMeterRegistry();
+        CompositeMeterRegistry nested2 = new CompositeMeterRegistry();
+        nested2.add(simple);
+        nested.add(nested2);
+        nested.add(simple);
+
+        composite.add(nested);
+
+        Counter counter = composite.counter("my.counter");
+        counter.increment();
+
+        assertThat(counter.count()).isEqualTo(1);
+    }
+
+    @Test
+    void addRegistryInfluencesCompositeAncestry() {
+        CompositeMeterRegistry nested = new CompositeMeterRegistry();
+        CompositeMeterRegistry nested2 = new CompositeMeterRegistry();
+        nested.add(nested2);
+        composite.add(nested);
+
+        nested2.add(simple);
+        assertThat(composite.nonCompositeDescendants).containsExactly(simple);
+    }
+
+    @Test
+    void removeRegistryInfluencesCompositeAncestry() {
+        CompositeMeterRegistry nested = new CompositeMeterRegistry();
+        CompositeMeterRegistry nested2 = new CompositeMeterRegistry();
+        nested2.add(simple);
+        nested.add(nested2);
+        composite.add(nested);
+
+        assertThat(composite.nonCompositeDescendants).containsExactly(simple);
+        nested2.remove(simple);
+
+        assertThat(composite.nonCompositeDescendants).isEmpty();
+    }
+
+    @Test
+    void compositeCannotContainItself() {
+        assertThatThrownBy(() -> composite.add(composite)).isInstanceOf(IllegalArgumentException.class);
+
+        CompositeMeterRegistry nested = new CompositeMeterRegistry();
+        nested.add(composite);
+        assertThatThrownBy(() -> composite.add(nested)).isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(composite.getRegistries()).isEmpty();
+    }
+
+    @Issue("#704")
+    @Test
+    void noDeadlockOnAddingAndRemovingRegistries() throws InterruptedException {
+        CompositeMeterRegistry composite2 = new CompositeMeterRegistry();
+        composite.add(composite2);
+
+        CountDownLatch latch = new CountDownLatch(1);
+        Flux.range(0, 10000)
+                .parallel(8)
+                .doOnTerminate(latch::countDown)
+                .runOn(Schedulers.parallel())
+                .subscribe(n -> {
+                    if (n % 2 == 0)
+                        composite2.add(simple);
+                    else composite2.remove(simple);
+                });
+
+        latch.await(10, TimeUnit.SECONDS);
+        assertThat(latch.getCount()).isZero();
     }
 }

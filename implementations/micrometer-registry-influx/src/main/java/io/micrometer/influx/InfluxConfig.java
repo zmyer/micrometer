@@ -19,6 +19,8 @@ import io.micrometer.core.instrument.step.StepRegistryConfig;
 import io.micrometer.core.lang.Nullable;
 
 /**
+ * Configuration for {@link InfluxMeterRegistry}.
+ *
  * @author Jon Schneider
  */
 public interface InfluxConfig extends StepRegistryConfig {
@@ -33,7 +35,7 @@ public interface InfluxConfig extends StepRegistryConfig {
     }
 
     /**
-     * The db to send metrics to. Defaults to "mydb".
+     * @return The db to send metrics to. Defaults to "mydb".
      */
     default String db() {
         String v = get(prefix() + ".db");
@@ -41,20 +43,18 @@ public interface InfluxConfig extends StepRegistryConfig {
     }
 
     /**
-     * Sets the write consistency for each point. The Influx default is 'one'. Must
-     * be one of 'any', 'one', 'quorum', or 'all'.
-     *
-     * Only available for InfluxEnterprise clusters.
+     * @return Sets the write consistency for each point. The Influx default is 'one'. Must
+     * be one of 'any', 'one', 'quorum', or 'all'. Only available for InfluxEnterprise clusters.
      */
     default InfluxConsistency consistency() {
         String v = get(prefix() + ".consistency");
-        if(v == null)
+        if (v == null)
             return InfluxConsistency.ONE;
         return InfluxConsistency.valueOf(v.toUpperCase());
     }
 
     /**
-     * Authenticate requests with this user. By default is {@code null}, and the registry will not
+     * @return Authenticate requests with this user. By default is {@code null}, and the registry will not
      * attempt to present credentials to Influx.
      */
     @Nullable
@@ -63,7 +63,7 @@ public interface InfluxConfig extends StepRegistryConfig {
     }
 
     /**
-     * Authenticate requests with this password. By default is {@code null}, and the registry will not
+     * @return Authenticate requests with this password. By default is {@code null}, and the registry will not
      * attempt to present credentials to Influx.
      */
     @Nullable
@@ -72,7 +72,7 @@ public interface InfluxConfig extends StepRegistryConfig {
     }
 
     /**
-     * Influx writes to the DEFAULT retention policy if one is not specified.
+     * @return Influx writes to the DEFAULT retention policy if one is not specified.
      */
     @Nullable
     default String retentionPolicy() {
@@ -80,8 +80,33 @@ public interface InfluxConfig extends StepRegistryConfig {
     }
 
     /**
-     * Returns the URI for the Influx backend. The default is
-     * {@code http://localhost:8086/write}.
+     * @return Time period for which influx should retain data in the current database (e.g. 2h, 52w).
+     */
+    @Nullable
+    default String retentionDuration() {
+        return get(prefix() + ".retentionDuration");
+    }
+
+    /**
+     * @return How many copies of the data are stored in the cluster. Must be 1 for a single node instance.
+     */
+    @Nullable
+    default Integer retentionReplicationFactor() {
+        String v = get(prefix() + ".retentionReplicationFactor");
+        return v == null ? null : Integer.parseInt(v);
+    }
+
+    /**
+     * @return The time range covered by a shard group (e.g. 2h, 52w).
+     */
+    @Nullable
+    default String retentionShardDuration() {
+        return get(prefix() + ".retentionShardDuration");
+    }
+
+
+    /**
+     * @return The URI for the Influx backend. The default is {@code http://localhost:8086}.
      */
     default String uri() {
         String v = get(prefix() + ".uri");
@@ -93,6 +118,15 @@ public interface InfluxConfig extends StepRegistryConfig {
      */
     default boolean compressed() {
         String v = get(prefix() + ".compressed");
+        return v == null || Boolean.valueOf(v);
+    }
+
+    /**
+     * @return {@code true} if Micrometer should check if {@link #db()} exists before attempting to publish
+     * metrics to it, creating it if it does not exist.
+     */
+    default boolean autoCreateDb() {
+        String v = get(prefix() + ".autoCreateDb");
         return v == null || Boolean.valueOf(v);
     }
 }

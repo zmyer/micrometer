@@ -19,11 +19,11 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.config.NamingConvention;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.HistogramGauges;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.internal.DefaultLongTaskTimer;
 import io.micrometer.core.instrument.internal.DefaultMeter;
-import io.micrometer.core.instrument.util.DoubleFormat;
 import io.micrometer.core.instrument.util.HierarchicalNameMapper;
 import io.micrometer.core.lang.Nullable;
 
@@ -35,7 +35,7 @@ import java.util.function.ToLongFunction;
 /**
  * @author Jon Schneider
  */
-public class DropwizardMeterRegistry extends MeterRegistry {
+public abstract class DropwizardMeterRegistry extends MeterRegistry {
     private final MetricRegistry registry;
     private final HierarchicalNameMapper nameMapper;
     private final DropwizardClock dropwizardClock;
@@ -66,53 +66,27 @@ public class DropwizardMeterRegistry extends MeterRegistry {
         final WeakReference<T> ref = new WeakReference<>(obj);
         Gauge<Double> gauge = () -> {
             T obj2 = ref.get();
-            return obj2 != null ? valueFunction.applyAsDouble(ref.get()) : Double.NaN;
+            if (obj2 != null) {
+                return valueFunction.applyAsDouble(obj2);
+            } else {
+                return nullGaugeValue();
+            }
         };
         registry.register(hierarchicalName(id), gauge);
         return new DropwizardGauge(id, gauge);
     }
 
     @Override
-    protected Timer newTimer(Meter.Id id, HistogramConfig histogramConfig, PauseDetector pauseDetector) {
-        DropwizardTimer timer = new DropwizardTimer(id, registry.timer(hierarchicalName(id)), clock, histogramConfig, pauseDetector);
-
-        if (histogramConfig.getPercentiles() != null) {
-            for (double percentile : histogramConfig.getPercentiles()) {
-                String formattedPercentile = DoubleFormat.toString(percentile * 100) + "percentile";
-                gauge(id.getName(), Tags.concat(getConventionTags(id), "percentile", formattedPercentile),
-                    timer, t -> t.percentile(percentile, getBaseTimeUnit()));
-            }
-        }
-
-        if (histogramConfig.isPublishingHistogram()) {
-            for (Long bucket : histogramConfig.getHistogramBuckets(false)) {
-                more().counter(getConventionName(id), Tags.concat(getConventionTags(id), "bucket", Long.toString(bucket)),
-                    timer, t -> t.histogramCountAtValue(bucket));
-            }
-        }
-
+    protected Timer newTimer(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector) {
+        DropwizardTimer timer = new DropwizardTimer(id, registry.timer(hierarchicalName(id)), clock, distributionStatisticConfig, pauseDetector);
+        HistogramGauges.registerWithCommonFormat(timer, this);
         return timer;
     }
 
     @Override
-    protected DistributionSummary newDistributionSummary(Meter.Id id, HistogramConfig histogramConfig) {
-        DropwizardDistributionSummary summary = new DropwizardDistributionSummary(id, clock, registry.histogram(hierarchicalName(id)), histogramConfig);
-
-        if (histogramConfig.getPercentiles() != null) {
-            for (double percentile : histogramConfig.getPercentiles()) {
-                String formattedPercentile = DoubleFormat.toString(percentile * 100) + "percentile";
-                gauge(id.getName(), Tags.concat(getConventionTags(id), "percentile", formattedPercentile),
-                    summary, s -> summary.percentile(percentile));
-            }
-        }
-
-        if (histogramConfig.isPublishingHistogram()) {
-            for (Long bucket : histogramConfig.getHistogramBuckets(false)) {
-                more().counter(getConventionName(id), Tags.concat(getConventionTags(id), "bucket", Long.toString(bucket)),
-                    summary, s -> s.histogramCountAtValue(bucket));
-            }
-        }
-
+    protected DistributionSummary newDistributionSummary(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, double scale) {
+        DropwizardDistributionSummary summary = new DropwizardDistributionSummary(id, clock, registry.histogram(hierarchicalName(id)), distributionStatisticConfig, scale);
+        HistogramGauges.registerWithCommonFormat(summary, this);
         return summary;
     }
 
@@ -125,16 +99,16 @@ public class DropwizardMeterRegistry extends MeterRegistry {
     }
 
     @Override
-    protected <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnits) {
+    protected <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnit) {
         DropwizardFunctionTimer ft = new DropwizardFunctionTimer<>(id, clock, obj, countFunction, totalTimeFunction,
-            totalTimeFunctionUnits, getBaseTimeUnit());
+                totalTimeFunctionUnit, getBaseTimeUnit());
         registry.register(hierarchicalName(id), ft.getDropwizardMeter());
         return ft;
     }
 
     @Override
-    protected <T> FunctionCounter newFunctionCounter(Meter.Id id, T obj, ToDoubleFunction<T> valueFunction) {
-        DropwizardFunctionCounter<T> fc = new DropwizardFunctionCounter<>(id, clock, obj, valueFunction);
+    protected <T> FunctionCounter newFunctionCounter(Meter.Id id, T obj, ToDoubleFunction<T> countFunction) {
+        DropwizardFunctionCounter<T> fc = new DropwizardFunctionCounter<>(id, clock, obj, countFunction);
         registry.register(hierarchicalName(id), fc.getDropwizardMeter());
         return fc;
     }
@@ -155,10 +129,15 @@ public class DropwizardMeterRegistry extends MeterRegistry {
     }
 
     @Override
-    protected HistogramConfig defaultHistogramConfig() {
-        return HistogramConfig.builder()
-            .histogramExpiry(dropwizardConfig.step())
-            .build()
-            .merge(HistogramConfig.DEFAULT);
+    protected DistributionStatisticConfig defaultHistogramConfig() {
+        return DistributionStatisticConfig.builder()
+                .expiry(dropwizardConfig.step())
+                .build()
+                .merge(DistributionStatisticConfig.DEFAULT);
     }
+
+    /**
+     * @return Value to report when {@link io.micrometer.core.instrument.Gauge#value()} returns {@code null}.
+     */
+    protected abstract Double nullGaugeValue();
 }

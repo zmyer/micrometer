@@ -15,40 +15,43 @@
  */
 package io.micrometer.newrelic;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.micrometer.core.annotation.Incubating;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.config.NamingConvention;
 import io.micrometer.core.instrument.step.StepMeterRegistry;
 import io.micrometer.core.instrument.util.DoubleFormat;
+import io.micrometer.core.instrument.util.HttpHeader;
+import io.micrometer.core.instrument.util.HttpMethod;
+import io.micrometer.core.instrument.util.IOUtils;
+import io.micrometer.core.instrument.util.MediaType;
 import io.micrometer.core.lang.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import static java.util.stream.Collectors.joining;
+import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.StreamSupport.stream;
 
 /**
+ * Publishes metrics to New Relic Insights.
+ *
  * @author Jon Schneider
  */
-@Incubating(since = "1.0.0-rc.5")
 public class NewRelicMeterRegistry extends StepMeterRegistry {
     private final NewRelicConfig config;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final Logger logger = LoggerFactory.getLogger(NewRelicMeterRegistry.class);
 
     public NewRelicMeterRegistry(NewRelicConfig config, Clock clock) {
@@ -58,7 +61,11 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
     public NewRelicMeterRegistry(NewRelicConfig config, Clock clock, ThreadFactory threadFactory) {
         super(config, clock);
         this.config = config;
-        config().namingConvention(NamingConvention.camelCase);
+
+        requireNonNull(config.accountId());
+        requireNonNull(config.apiKey());
+
+        config().namingConvention(new NewRelicNamingConvention());
         start(threadFactory);
     }
 
@@ -70,53 +77,34 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
             // New Relic's Insights API limits us to 1000 events per call
             final int batchSize = Math.min(config.batchSize(), 1000);
 
-            List<Event> events = new ArrayList<>();
-
-            for (Meter meter : getMeters()) {
-                Meter.Id id = meter.getId();
-
+            List<String> events = getMeters().stream().flatMap(meter -> {
                 if (meter instanceof Timer) {
-                    HistogramSnapshot t = ((Timer) meter).takeSnapshot(false);
-
-                    events.add(event(id, "count", t.count()));
-                    events.add(event(id, "sum", t.total(getBaseTimeUnit())));
-                    events.add(event(id, "avg", t.mean(getBaseTimeUnit())));
-                    events.add(event(id, "max", t.max(getBaseTimeUnit())));
-
-                    for (ValueAtPercentile valueAtPercentile : t.percentileValues()) {
-                        events.add(event(id, "percentile", valueAtPercentile.value(getBaseTimeUnit()), "phi",
-                            DoubleFormat.toString(valueAtPercentile.percentile())));
-                    }
+                    return writeTimer((Timer) meter);
                 } else if (meter instanceof FunctionTimer) {
-                    FunctionTimer t = (FunctionTimer) meter;
-                    events.add(event(id, "count", t.count()));
-                    events.add(event(id, "sum", t.count()));
-                    events.add(event(id, "mean", t.mean(getBaseTimeUnit())));
+                    return writeTimer((FunctionTimer) meter);
                 } else if (meter instanceof DistributionSummary) {
-                    HistogramSnapshot t = ((DistributionSummary) meter).takeSnapshot(false);
-
-                    events.add(event(id, "count", t.count()));
-                    events.add(event(id, "sum", t.total()));
-                    events.add(event(id, "avg", t.mean()));
-                    events.add(event(id, "max", t.max()));
-
-                    for (ValueAtPercentile valueAtPercentile : t.percentileValues()) {
-                        events.add(event(id, "percentile", valueAtPercentile.value(), "phi",
-                            DoubleFormat.toString(valueAtPercentile.percentile())));
-                    }
+                    return writeSummary((DistributionSummary) meter);
+                } else if (meter instanceof TimeGauge) {
+                    return writeGauge((TimeGauge) meter);
+                } else if (meter instanceof Gauge) {
+                    return writeGauge((Gauge) meter);
+                } else if (meter instanceof Counter) {
+                    return writeCounter((Counter) meter);
+                } else if (meter instanceof FunctionCounter) {
+                    return writeCounter((FunctionCounter) meter);
+                } else if (meter instanceof LongTaskTimer) {
+                    return writeLongTaskTimer((LongTaskTimer) meter);
                 } else {
-                    for (Measurement measurement : meter.measure()) {
-                        events.add(event(id, measurement.getStatistic().toString(), measurement.getValue()));
-                    }
+                    return writeMeter(meter);
                 }
+            }).collect(toList());
 
-                if (events.size() > batchSize) {
-                    sendEvents(insightsEndpoint, events.subList(0, batchSize));
-                    events = new ArrayList<>(events.subList(batchSize, events.size()));
-                } else if (events.size() == batchSize) {
-                    sendEvents(insightsEndpoint, events);
-                    events = new ArrayList<>();
-                }
+            if (events.size() > batchSize) {
+                sendEvents(insightsEndpoint, events.subList(0, batchSize));
+                events = new ArrayList<>(events.subList(batchSize, events.size()));
+            } else if (events.size() == batchSize) {
+                sendEvents(insightsEndpoint, events);
+                events = new ArrayList<>();
             }
 
             // drain the remaining event list
@@ -124,30 +112,100 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
                 sendEvents(insightsEndpoint, events);
             }
         } catch (MalformedURLException e) {
-            throw new IllegalArgumentException("Malformed New Relic insights endpoint, see '" + config.prefix() + ".uri'", e);
+            throw new IllegalArgumentException("malformed New Relic insights endpoint -- see the 'uri' configuration", e);
         } catch (Throwable t) {
             logger.warn("failed to send metrics", t);
         }
     }
 
-    private Event event(Meter.Id id, String statistic, Number value, String... additionalTags) {
-        Event event = new Event();
-
-        event.put("eventType", getConventionName(id));
-        event.put("statistic", statistic);
-        event.put("value", value);
-
-        for (int i = 0; i < additionalTags.length; i += 2) {
-            event.put(additionalTags[i], additionalTags[i + 1]);
-        }
-
-        id.getTags().forEach(t -> event.put(t.getKey(), t.getValue()));
-
-        return event;
+    private Stream<String> writeLongTaskTimer(LongTaskTimer ltt) {
+        return Stream.of(
+                event(ltt.getId(),
+                        new Attribute("activeTasks", ltt.activeTasks()),
+                        new Attribute("duration", ltt.duration(getBaseTimeUnit())))
+        );
     }
 
-    // TODO HTTP/1.1 Persistent connections are supported
-    private void sendEvents(URL insightsEndpoint, List<Event> events) {
+    private Stream<String> writeCounter(FunctionCounter counter) {
+        return Stream.of(event(counter.getId(), new Attribute("throughput", counter.count())));
+    }
+
+    private Stream<String> writeCounter(Counter counter) {
+        return Stream.of(event(counter.getId(), new Attribute("throughput", counter.count())));
+    }
+
+    private Stream<String> writeGauge(Gauge gauge) {
+        Double value = gauge.value();
+        return value.isNaN() ? Stream.empty() : Stream.of(event(gauge.getId(), new Attribute("value", value)));
+    }
+
+    private Stream<String> writeGauge(TimeGauge gauge) {
+        Double value = gauge.value(getBaseTimeUnit());
+        return value.isNaN() ? Stream.empty() : Stream.of(event(gauge.getId(), new Attribute("value", value)));
+    }
+
+    private Stream<String> writeSummary(DistributionSummary summary) {
+        return Stream.of(
+                event(summary.getId(),
+                        new Attribute("count", summary.count()),
+                        new Attribute("avg", summary.mean()),
+                        new Attribute("total", summary.totalAmount()),
+                        new Attribute("max", summary.max())
+                )
+        );
+    }
+
+    private Stream<String> writeTimer(Timer timer) {
+        return Stream.of(event(timer.getId(),
+                new Attribute("count", timer.count()),
+                new Attribute("avg", timer.mean(getBaseTimeUnit())),
+                new Attribute("totalTime", timer.totalTime(getBaseTimeUnit())),
+                new Attribute("max", timer.max(getBaseTimeUnit()))
+        ));
+    }
+
+    private Stream<String> writeTimer(FunctionTimer timer) {
+        return Stream.of(
+                event(timer.getId(),
+                        new Attribute("count", timer.count()),
+                        new Attribute("avg", timer.mean(getBaseTimeUnit())),
+                        new Attribute("totalTime", timer.totalTime(getBaseTimeUnit()))
+                )
+        );
+    }
+
+    private Stream<String> writeMeter(Meter meter) {
+        return Stream.of(
+                event(meter.getId(),
+                        stream(meter.measure().spliterator(), false)
+                                .map(measure -> new Attribute(measure.getStatistic().getTagValueRepresentation(), measure.getValue()))
+                                .toArray(Attribute[]::new)
+                )
+        );
+    }
+
+    private String event(Meter.Id id, Attribute... attributes) {
+        return event(id, Tags.empty(), attributes);
+    }
+
+    private String event(Meter.Id id, Iterable<Tag> extraTags, Attribute... attributes) {
+        StringBuilder tagsJson = new StringBuilder();
+
+        for (Tag tag : getConventionTags(id)) {
+            tagsJson.append(",\"").append(tag.getKey()).append("\":\"").append(tag.getValue()).append("\"");
+        }
+
+        NamingConvention convention = config().namingConvention();
+        for (Tag tag : extraTags) {
+            tagsJson.append(",\"").append(convention.tagKey(tag.getKey())).append("\":\"").append(convention.tagValue(tag.getValue())).append("\"");
+        }
+
+        return "{\"eventType\":\"" + getConventionName(id) + "\"" +
+                Arrays.stream(attributes).map(attr -> ",\"" + attr.getName() + "\":" + DoubleFormat.decimalOrWhole(attr.getValue().doubleValue()))
+                        .collect(Collectors.joining("")) + tagsJson.toString() + "}";
+    }
+
+    private void sendEvents(URL insightsEndpoint, List<String> events) {
 
         HttpURLConnection con = null;
 
@@ -155,13 +213,16 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
             con = (HttpURLConnection) insightsEndpoint.openConnection();
             con.setConnectTimeout((int) config.connectTimeout().toMillis());
             con.setReadTimeout((int) config.readTimeout().toMillis());
-            con.setRequestMethod("POST");
-            con.setRequestProperty("Content-Type", "application/json");
+            con.setRequestMethod(HttpMethod.POST);
+            con.setRequestProperty(HttpHeader.CONTENT_TYPE, MediaType.APPLICATION_JSON);
             con.setRequestProperty("X-Insert-Key", config.apiKey());
 
             con.setDoOutput(true);
 
-            String body = mapper.writeValueAsString(events);
+            String body = "[" + events.stream().collect(Collectors.joining(",")) + "]";
+
+            logger.trace("Sending payload to New Relic:");
+            logger.trace(body);
 
             try (OutputStream os = con.getOutputStream()) {
                 os.write(body.getBytes());
@@ -173,12 +234,11 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
             if (status >= 200 && status < 300) {
                 logger.info("successfully sent {} events to New Relic", events.size());
             } else if (status >= 400) {
-                try (InputStream in = con.getErrorStream()) {
-                    logger.error("failed to send metrics: " + new BufferedReader(new InputStreamReader(in))
-                        .lines().collect(joining("\n")));
+                if (logger.isErrorEnabled()) {
+                    logger.error("failed to send metrics: {}", IOUtils.toString(con.getErrorStream()));
                 }
             } else {
-                logger.error("failed to send metrics: http " + status);
+                logger.error("failed to send metrics: http {}", status);
             }
 
         } catch (Throwable e) {
@@ -202,6 +262,21 @@ public class NewRelicMeterRegistry extends StepMeterRegistry {
         return TimeUnit.SECONDS;
     }
 
-    private class Event extends HashMap<String, Object> {
+    private class Attribute {
+        private final String name;
+        private final Number value;
+
+        private Attribute(String name, Number value) {
+            this.name = name;
+            this.value = value;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public Number getValue() {
+            return value;
+        }
     }
 }

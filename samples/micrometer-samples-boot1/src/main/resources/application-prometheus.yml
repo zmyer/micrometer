@@ -15,9 +15,5 @@
 #
 
 management.security.enabled: false
-
-management.metrics.export:
-  prometheus.enabled: true
-  filter:
-    hystrix.latency:
-      percentiles: 0.50,0.95,0.999
+management.metrics.export.prometheus.enabled: true
+management.metrics.distribution.percentiles-histogram.http: true

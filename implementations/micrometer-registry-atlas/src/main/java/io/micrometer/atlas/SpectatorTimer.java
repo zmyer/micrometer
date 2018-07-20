@@ -20,8 +20,8 @@ import com.netflix.spectator.api.Statistic;
 import com.netflix.spectator.api.Timer;
 import io.micrometer.core.instrument.AbstractTimer;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.util.TimeUtils;
 
 import java.util.concurrent.TimeUnit;
@@ -31,8 +31,8 @@ import static java.util.stream.StreamSupport.stream;
 public class SpectatorTimer extends AbstractTimer {
     private final com.netflix.spectator.api.Timer timer;
 
-    public SpectatorTimer(Id id, Timer timer, Clock clock, HistogramConfig statsConf, PauseDetector pauseDetector, TimeUnit baseTimeUnit) {
-        super(id, clock, statsConf, pauseDetector, baseTimeUnit);
+    public SpectatorTimer(Id id, Timer timer, Clock clock, DistributionStatisticConfig statsConf, PauseDetector pauseDetector, TimeUnit baseTimeUnit) {
+        super(id, clock, statsConf, pauseDetector, baseTimeUnit, false);
         this.timer = timer;
     }
 
@@ -55,7 +55,7 @@ public class SpectatorTimer extends AbstractTimer {
     @Override
     public double max(TimeUnit unit) {
         for (Measurement measurement : timer.measure()) {
-            if(stream(measurement.id().tags().spliterator(), false)
+            if (stream(measurement.id().tags().spliterator(), false)
                 .anyMatch(tag -> tag.key().equals("statistic") && tag.value().equals(Statistic.max.toString()))) {
                 return TimeUtils.secondsToUnit(measurement.value(), unit);
             }

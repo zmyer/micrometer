@@ -18,18 +18,27 @@ package io.micrometer.core.instrument;
 import io.micrometer.core.Issue;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.config.MeterFilterReply;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import io.micrometer.core.lang.Nullable;
 import org.assertj.core.api.Condition;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.emptyList;
 import static java.util.stream.StreamSupport.stream;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.verifyZeroInteractions;
 
 /**
+ * Tests for {@link MeterFilter}.
+ *
  * @author Jon Schneider
+ * @author Johnny Lim
  */
 class MeterFilterTest {
     private static Condition<Meter.Id> tag(String tagKey) {
@@ -114,7 +123,8 @@ class MeterFilterTest {
 
         Meter.Id id = new Meter.Id("name", Tags.of("k", "1"), null, null, Meter.Type.COUNTER);
         Meter.Id id2 = new Meter.Id("name", Tags.of("k", "2"), null, null, Meter.Type.COUNTER);
-        Meter.Id id3 = new Meter.Id("name", Tags.of("k", "3"), null, null, Meter.Type.COUNTER);
+        Meter.Id id3 = new Meter.Id("name", Tags.of("k", "3"), null, null, Meter.Type.COUNTER); 
+        Meter.Id id4 = new Meter.Id("anotherName", Tags.of("tag", "4"), null, null, Meter.Type.COUNTER);
 
         filter.accept(id);
         filter.accept(id);
@@ -123,5 +133,99 @@ class MeterFilterTest {
         filter.accept(id3);
 
         assertThat(n.get()).isEqualTo(1);
+        
+        filter.accept(id4);
+        assertThat(n.get()).isEqualTo(1);
+    }
+
+    @Test
+    void maximumAllowableTagsWhenDifferentTagKeyShouldNotAffect() {
+        MeterFilter onMaxReached = mock(MeterFilter.class);
+        MeterFilter filter = MeterFilter.maximumAllowableTags("name1", "key1", 3, onMaxReached);
+
+        Meter.Id id1 = new Meter.Id("name1", Tags.of("key1", "value1"), null, null, Meter.Type.COUNTER);
+        Meter.Id id2 = new Meter.Id("name1", Tags.of("key1", "value2"), null, null, Meter.Type.COUNTER);
+        Meter.Id id3 = new Meter.Id("name1", Tags.of("key1", "value3"), null, null, Meter.Type.COUNTER);
+        Meter.Id id4 = new Meter.Id("name1", Tags.of("key1", "value4"), null, null, Meter.Type.COUNTER);
+        Meter.Id id5 = new Meter.Id("name1", Tags.of("key2", "value5"), null, null, Meter.Type.COUNTER);
+
+        filter.accept(id1);
+        filter.accept(id2);
+        filter.accept(id3);
+        verifyZeroInteractions(onMaxReached);
+
+        filter.accept(id4);
+        verify(onMaxReached).accept(id4);
+
+        filter.accept(id5);
+        verifyNoMoreInteractions(onMaxReached);
+    }
+
+    @Test
+    void maximumAllowableTagsWhenAlreadyInAllowableTagValuesShouldNotAffect() {
+        MeterFilter onMaxReached = mock(MeterFilter.class);
+        MeterFilter filter = MeterFilter.maximumAllowableTags("name1", "key1", 3, onMaxReached);
+
+        Meter.Id id1 = new Meter.Id("name1", Tags.of("key1", "value1"), null, null, Meter.Type.COUNTER);
+        Meter.Id id2 = new Meter.Id("name1", Tags.of("key1", "value2"), null, null, Meter.Type.COUNTER);
+        Meter.Id id3 = new Meter.Id("name1", Tags.of("key1", "value3"), null, null, Meter.Type.COUNTER);
+        Meter.Id id4 = new Meter.Id("name1", Tags.of("key1", "value4"), null, null, Meter.Type.COUNTER);
+
+        filter.accept(id1);
+        filter.accept(id2);
+        filter.accept(id3);
+        verifyZeroInteractions(onMaxReached);
+
+        filter.accept(id4);
+        verify(onMaxReached).accept(id4);
+
+        filter.accept(id1);
+        verifyNoMoreInteractions(onMaxReached);
+    }
+
+    @Test
+    void minExpectedOnSummary() {
+        MeterFilter filter = MeterFilter.minExpected("name", 100);
+        Meter.Id timer = new Meter.Id("name", emptyList(), null, null, Meter.Type.DISTRIBUTION_SUMMARY);
+
+        assertThat(filter.configure(timer, DistributionStatisticConfig.DEFAULT))
+                .satisfies(conf -> assertThat(conf.getMinimumExpectedValue()).isEqualTo(100));
+    }
+
+    @Test
+    void maxExpectedOnSummary() {
+        MeterFilter filter = MeterFilter.maxExpected("name", 100);
+        Meter.Id timer = new Meter.Id("name", emptyList(), null, null, Meter.Type.DISTRIBUTION_SUMMARY);
+
+        assertThat(filter.configure(timer, DistributionStatisticConfig.DEFAULT))
+                .satisfies(conf -> assertThat(conf.getMaximumExpectedValue()).isEqualTo(100));
+    }
+
+    @Test
+    void minExpectedOnTimer() {
+        MeterFilter filter = MeterFilter.minExpected("name", Duration.ofNanos(100));
+        Meter.Id timer = new Meter.Id("name", emptyList(), null, null, Meter.Type.TIMER);
+
+        assertThat(filter.configure(timer, DistributionStatisticConfig.DEFAULT))
+                .satisfies(conf -> assertThat(conf.getMinimumExpectedValue()).isEqualTo(100));
+    }
+
+    @Test
+    void maxExpectedOnTimer() {
+        MeterFilter filter = MeterFilter.maxExpected("name", Duration.ofNanos(100));
+        Meter.Id timer = new Meter.Id("name", emptyList(), null, null, Meter.Type.TIMER);
+
+        assertThat(filter.configure(timer, DistributionStatisticConfig.DEFAULT))
+                .satisfies(conf -> assertThat(conf.getMaximumExpectedValue()).isEqualTo(100));
+    }
+
+    @Test
+    void denyUnless() {
+        Meter.Id id1 = new Meter.Id("my.counter", emptyList(), null, null, Meter.Type.COUNTER);
+        Meter.Id id2 = new Meter.Id("other.counter", emptyList(), null, null, Meter.Type.COUNTER);
+
+        MeterFilter filter = MeterFilter.denyUnless(id -> id.getName().startsWith("my"));
+        assertThat(filter.accept(id1)).isEqualTo(MeterFilterReply.NEUTRAL);
+        assertThat(filter.accept(id2)).isEqualTo(MeterFilterReply.DENY);
     }
 }

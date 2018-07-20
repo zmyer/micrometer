@@ -19,22 +19,29 @@ import io.micrometer.core.instrument.AbstractDistributionSummary;
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.Measurement;
 import io.micrometer.core.instrument.Statistic;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.util.TimeDecayingMax;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.TimeWindowMax;
 
 import java.util.Arrays;
 
 public class StepDistributionSummary extends AbstractDistributionSummary {
     private final StepLong count;
     private final StepDouble total;
-    private final TimeDecayingMax max;
+    private final TimeWindowMax max;
+
+    @Deprecated
+    public StepDistributionSummary(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig,
+                                   long stepMillis, double scale) {
+        this(id, clock, distributionStatisticConfig, scale, stepMillis, false);
+    }
 
     @SuppressWarnings("ConstantConditions")
-    public StepDistributionSummary(Id id, Clock clock, HistogramConfig histogramConfig) {
-        super(id, clock, histogramConfig);
-        this.count = new StepLong(clock, histogramConfig.getHistogramExpiry().toMillis());
-        this.total = new StepDouble(clock, histogramConfig.getHistogramExpiry().toMillis());
-        this.max = new TimeDecayingMax(clock, histogramConfig);
+    public StepDistributionSummary(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig, double scale,
+                                   long stepMillis, boolean supportsAggregablePercentiles) {
+        super(id, clock, distributionStatisticConfig, scale, supportsAggregablePercentiles);
+        this.count = new StepLong(clock, stepMillis);
+        this.total = new StepDouble(clock, stepMillis);
+        this.max = new TimeWindowMax(clock, distributionStatisticConfig);
     }
 
     @Override
@@ -62,9 +69,9 @@ public class StepDistributionSummary extends AbstractDistributionSummary {
     @Override
     public Iterable<Measurement> measure() {
         return Arrays.asList(
-            new Measurement(() -> (double) count(), Statistic.COUNT),
-            new Measurement(this::totalAmount, Statistic.TOTAL),
-            new Measurement(this::max, Statistic.MAX)
+                new Measurement(() -> (double) count(), Statistic.COUNT),
+                new Measurement(this::totalAmount, Statistic.TOTAL),
+                new Measurement(this::max, Statistic.MAX)
         );
     }
 }

@@ -23,6 +23,10 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.lang.Nullable;
 import io.micrometer.datadog.DatadogConfig;
 import io.micrometer.datadog.DatadogMeterRegistry;
+import io.micrometer.dynatrace.DynatraceConfig;
+import io.micrometer.dynatrace.DynatraceMeterRegistry;
+import io.micrometer.elastic.ElasticConfig;
+import io.micrometer.elastic.ElasticMeterRegistry;
 import io.micrometer.ganglia.GangliaConfig;
 import io.micrometer.ganglia.GangliaMeterRegistry;
 import io.micrometer.graphite.GraphiteConfig;
@@ -40,6 +44,8 @@ import io.micrometer.signalfx.SignalFxMeterRegistry;
 import io.micrometer.statsd.StatsdConfig;
 import io.micrometer.statsd.StatsdFlavor;
 import io.micrometer.statsd.StatsdMeterRegistry;
+import io.micrometer.wavefront.WavefrontConfig;
+import io.micrometer.wavefront.WavefrontMeterRegistry;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -54,7 +60,8 @@ public class SampleRegistries {
     /**
      * To use pushgateway instead:
      * new PushGateway("localhost:9091").pushAdd(registry.getPrometheusRegistry(), "samples");
-     * @return
+     *
+     * @return A prometheus registry.
      */
     public static PrometheusMeterRegistry prometheus() {
         PrometheusMeterRegistry prometheusRegistry = new PrometheusMeterRegistry(new PrometheusConfig() {
@@ -131,6 +138,21 @@ public class SampleRegistries {
         return new DatadogMeterRegistry(config, Clock.SYSTEM);
     }
 
+    public static ElasticMeterRegistry elastic() {
+        return new ElasticMeterRegistry(new ElasticConfig() {
+            @Override
+            public Duration step() {
+                return Duration.ofSeconds(10);
+            }
+
+            @Override
+            @Nullable
+            public String get(String k) {
+                return null;
+            }
+        }, Clock.SYSTEM);
+    }
+
     public static StatsdMeterRegistry datadogStatsd() {
         return new StatsdMeterRegistry(new StatsdConfig() {
             @Override
@@ -167,6 +189,26 @@ public class SampleRegistries {
             @Override
             public StatsdFlavor flavor() {
                 return StatsdFlavor.TELEGRAF;
+            }
+        }, Clock.SYSTEM);
+    }
+
+    public static StatsdMeterRegistry sysdigStatsd() {
+        return new StatsdMeterRegistry(new StatsdConfig() {
+            @Override
+            public Duration step() {
+                return Duration.ofSeconds(10);
+            }
+
+            @Override
+            @Nullable
+            public String get(String k) {
+                return null;
+            }
+
+            @Override
+            public StatsdFlavor flavor() {
+                return StatsdFlavor.SYSDIG;
             }
         }, Clock.SYSTEM);
     }
@@ -229,6 +271,11 @@ public class SampleRegistries {
             }
 
             @Override
+            public Duration step() {
+                return Duration.ofSeconds(10);
+            }
+
+            @Override
             @Nullable
             public String get(String k) {
                 return null;
@@ -277,6 +324,58 @@ public class SampleRegistries {
             @Nullable
             public String get(String k) {
                 return null;
+            }
+        }, Clock.SYSTEM);
+    }
+
+    public static WavefrontMeterRegistry wavefront() {
+        return new WavefrontMeterRegistry(WavefrontConfig.DEFAULT_PROXY, Clock.SYSTEM);
+    }
+
+    public static WavefrontMeterRegistry wavefrontDirect(String apiToken) {
+        return new WavefrontMeterRegistry(new WavefrontConfig() {
+            @Override
+            public String get(String key) {
+                return null;
+            }
+
+            @Override
+            public String apiToken() {
+                return apiToken;
+            }
+
+            @Override
+            public String uri() {
+                return "https://longboard.wavefront.com";
+            }
+        }, Clock.SYSTEM);
+    }
+
+    public static DynatraceMeterRegistry dynatrace(String apiToken, String uri) {
+        return new DynatraceMeterRegistry(new DynatraceConfig() {
+            @Override
+            public String get(String key) {
+                return null;
+            }
+
+            @Override
+            public String apiToken() {
+                return apiToken;
+            }
+
+            @Override
+            public String uri() {
+                return uri;
+            }
+
+            @Override
+            public String deviceId() {
+                return "sample";
+            }
+
+            @Override
+            public Duration step() {
+                return Duration.ofSeconds(10);
             }
         }, Clock.SYSTEM);
     }

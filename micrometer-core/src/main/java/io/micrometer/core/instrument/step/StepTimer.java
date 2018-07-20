@@ -17,9 +17,9 @@ package io.micrometer.core.instrument.step;
 
 import io.micrometer.core.instrument.AbstractTimer;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
-import io.micrometer.core.instrument.util.TimeDecayingMax;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.TimeWindowMax;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.util.TimeUtils;
 
 import java.util.concurrent.TimeUnit;
@@ -30,17 +30,21 @@ import java.util.concurrent.TimeUnit;
 public class StepTimer extends AbstractTimer {
     private final StepLong count;
     private final StepLong total;
-    private final TimeDecayingMax max;
+    private final TimeWindowMax max;
 
-    /**
-     * Create a new instance.
-     */
+    @Deprecated
+    public StepTimer(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig,
+                     PauseDetector pauseDetector, TimeUnit baseTimeUnit, long stepMillis) {
+        this(id, clock, distributionStatisticConfig, pauseDetector, baseTimeUnit,  stepMillis,false);
+    }
+
     @SuppressWarnings("ConstantConditions")
-    public StepTimer(Id id, Clock clock, HistogramConfig histogramConfig, PauseDetector pauseDetector, TimeUnit baseTimeUnit) {
-        super(id, clock, histogramConfig, pauseDetector, baseTimeUnit);
-        this.count = new StepLong(clock, histogramConfig.getHistogramExpiry().toMillis());
-        this.total = new StepLong(clock, histogramConfig.getHistogramExpiry().toMillis());
-        this.max = new TimeDecayingMax(clock, histogramConfig);
+    public StepTimer(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig,
+                     PauseDetector pauseDetector, TimeUnit baseTimeUnit, long stepMillis, boolean supportsAggregablePercentiles) {
+        super(id, clock, distributionStatisticConfig, pauseDetector, baseTimeUnit, supportsAggregablePercentiles);
+        this.count = new StepLong(clock, stepMillis);
+        this.total = new StepLong(clock, stepMillis);
+        this.max = new TimeWindowMax(clock, distributionStatisticConfig);
     }
 
     @Override

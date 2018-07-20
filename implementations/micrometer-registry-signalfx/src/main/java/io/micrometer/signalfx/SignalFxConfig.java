@@ -15,10 +15,18 @@
  */
 package io.micrometer.signalfx;
 
+import io.micrometer.core.instrument.config.MissingRequiredConfigurationException;
 import io.micrometer.core.instrument.step.StepRegistryConfig;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Duration;
 
+/**
+ * Configuration for {@link SignalFxMeterRegistry}.
+ *
+ * @author Jon Schneider
+ */
 public interface SignalFxConfig extends StepRegistryConfig {
     SignalFxConfig DEFAULT = k -> null;
 
@@ -29,13 +37,13 @@ public interface SignalFxConfig extends StepRegistryConfig {
 
     default String accessToken() {
         String v = get(prefix() + ".accessToken");
-        if(v == null)
-            throw new IllegalStateException(prefix() + ".accessToken must be set to report metrics to SignalFX");
+        if (v == null)
+            throw new MissingRequiredConfigurationException("accessToken must be set to report metrics to SignalFX");
         return v;
     }
 
     /**
-     * The URI to ship metrics to. If you need to publish metrics to an internal proxy en route to
+     * @return The URI to ship metrics to. If you need to publish metrics to an internal proxy en route to
      * SignalFx, you can define the location of the proxy with this.
      */
     default String uri() {
@@ -43,8 +51,24 @@ public interface SignalFxConfig extends StepRegistryConfig {
         return v == null ? "https://ingest.signalfx.com" : v;
     }
 
+    /**
+     * @return Unique identifier for the app instance that is publishing metrics to SignalFx. Defaults to the local host name.
+     */
+    default String source() {
+        String v = get(prefix() + ".source");
+        if (v != null)
+            return v;
+
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException uhe) {
+            return "unknown";
+        }
+    }
+
     @Override
     default Duration step() {
-        return Duration.ofSeconds(10);
+        String v = get(prefix() + ".step");
+        return v == null ? Duration.ofSeconds(10) : Duration.parse(v);
     }
 }

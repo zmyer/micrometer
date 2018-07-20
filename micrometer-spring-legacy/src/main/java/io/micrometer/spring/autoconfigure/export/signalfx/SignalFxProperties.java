@@ -31,8 +31,13 @@ public class SignalFxProperties extends StepRegistryProperties {
     private String accessToken;
 
     /**
+     * Uniquely identifies the app instance that is publishing metrics to SignalFx. Defaults to the local host name.
+     */
+    private String source;
+
+    /**
      * The URI to ship metrics to. If you need to publish metrics to an internal proxy en route to
-     * datadoghq, you can define the location of the proxy with this.
+     * SignalFx, you can define the location of the proxy with this.
      */
     private String uri;
 
@@ -50,5 +55,13 @@ public class SignalFxProperties extends StepRegistryProperties {
 
     public void setUri(String uri) {
         this.uri = uri;
+    }
+
+    public String getSource() {
+        return source;
+    }
+
+    public void setSource(String source) {
+        this.source = source;
     }
 }

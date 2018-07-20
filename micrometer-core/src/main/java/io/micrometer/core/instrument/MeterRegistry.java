@@ -15,24 +15,26 @@
  */
 package io.micrometer.core.instrument;
 
-import io.micrometer.core.annotation.Incubating;
 import io.micrometer.core.instrument.Meter.Id;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.config.NamingConvention;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.ClockDriftPauseDetector;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.pause.ClockDriftPauseDetector;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.noop.*;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
 import io.micrometer.core.instrument.search.RequiredSearch;
 import io.micrometer.core.instrument.search.Search;
 import io.micrometer.core.instrument.util.TimeUtils;
 import io.micrometer.core.lang.Nullable;
+import org.pcollections.HashTreePMap;
+import org.pcollections.PMap;
 
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.*;
 
 import static java.util.Collections.emptyList;
@@ -48,18 +50,20 @@ import static java.util.Objects.requireNonNull;
  *
  * @author Jon Schneider
  */
-public abstract class MeterRegistry {
+public abstract class MeterRegistry implements AutoCloseable {
     protected final Clock clock;
     private final Object meterMapLock = new Object();
     private final List<MeterFilter> filters = new CopyOnWriteArrayList<>();
     private final List<Consumer<Meter>> meterAddedListeners = new CopyOnWriteArrayList<>();
     private final Config config = new Config();
     private final More more = new More();
-    private volatile Map<Id, Meter> meterMap = Collections.emptyMap();
+    private volatile PMap<Id, Meter> meterMap = HashTreePMap.empty();
+    private final AtomicBoolean closed = new AtomicBoolean(false);
     private PauseDetector pauseDetector = new ClockDriftPauseDetector(
-        Duration.ofMillis(100),
-        Duration.ofMillis(100)
+            Duration.ofMillis(100),
+            Duration.ofMillis(100)
     );
+
     /**
      * We'll use snake case as a general-purpose default for registries because it is the most
      * likely to result in a portable name. Camel casing is also perfectly acceptable. '-' and '.'
@@ -104,23 +108,29 @@ public abstract class MeterRegistry {
     /**
      * Build a new timer to be added to the registry. This is guaranteed to only be called if the timer doesn't already exist.
      *
-     * @param id The id that uniquely identifies the timer.
+     * @param id                          The id that uniquely identifies the timer.
+     * @param distributionStatisticConfig Configuration for published distribution statistics.
+     * @param pauseDetector               The pause detector to use for coordinated omission compensation.
      * @return A new timer.
      */
-    protected abstract Timer newTimer(Meter.Id id, HistogramConfig histogramConfig, PauseDetector pauseDetector);
+    protected abstract Timer newTimer(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector);
 
     /**
      * Build a new distribution summary to be added to the registry. This is guaranteed to only be called if the distribution summary doesn't already exist.
      *
-     * @param id The id that uniquely identifies the distribution summary.
+     * @param id                          The id that uniquely identifies the distribution summary.
+     * @param distributionStatisticConfig Configuration for published distribution statistics.
+     * @param scale                       Multiply every recorded sample by this factor.
      * @return A new distribution summary.
      */
-    protected abstract DistributionSummary newDistributionSummary(Meter.Id id, HistogramConfig histogramConfig);
+    protected abstract DistributionSummary newDistributionSummary(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, double scale);
 
     /**
      * Build a new custom meter to be added to the registry. This is guaranteed to only be called if the custom meter doesn't already exist.
      *
-     * @param id The id that uniquely identifies the custom meter.
+     * @param id           The id that uniquely identifies the custom meter.
+     * @param type         What kind of meter this is.
+     * @param measurements A set of measurements describing how to sample this meter.
      * @return A new custom meter.
      */
     protected abstract Meter newMeter(Meter.Id id, Meter.Type type, Iterable<Measurement> measurements);
@@ -128,17 +138,21 @@ public abstract class MeterRegistry {
     /**
      * Build a new time gauge to be added to the registry. This is guaranteed to only be called if the time gauge doesn't already exist.
      *
-     * @param id The id that uniquely identifies the time gauge.
+     * @param id                The id that uniquely identifies the time gauge.
+     * @param obj               The state object from which the value function derives a measurement.
+     * @param valueFunctionUnit The base unit of time returned by the value function.
+     * @param valueFunction     A function returning a time value that can go up or down.
+     * @param <T>               The type of the object upon which the value function derives a measurement.
      * @return A new time gauge.
      */
-    protected <T> TimeGauge newTimeGauge(Meter.Id id, T obj, TimeUnit valueFunctionUnit, ToDoubleFunction<T> valueFunction) {
+    protected <T> TimeGauge newTimeGauge(Meter.Id id, @Nullable T obj, TimeUnit valueFunctionUnit, ToDoubleFunction<T> valueFunction) {
         Meter.Id withUnit = id.withBaseUnit(getBaseTimeUnitStr());
         Gauge gauge = newGauge(withUnit, obj, obj2 -> TimeUtils.convert(valueFunction.applyAsDouble(obj2), valueFunctionUnit, getBaseTimeUnit()));
 
         return new TimeGauge() {
             @Override
             public Id getId() {
-                return id;
+                return withUnit;
             }
 
             @Override
@@ -156,18 +170,26 @@ public abstract class MeterRegistry {
     /**
      * Build a new function timer to be added to the registry. This is guaranteed to only be called if the function timer doesn't already exist.
      *
-     * @param id The id that uniquely identifies the function timer.
+     * @param id                     The id that uniquely identifies the function timer.
+     * @param obj                    The state object from which the count and total functions derive measurements.
+     * @param countFunction          A monotonically increasing count function.
+     * @param totalTimeFunction      A monotonically increasing total time function.
+     * @param totalTimeFunctionUnit The base unit of time of the totals returned by the total time function.
+     * @param <T>                    The type of the object upon which the value functions derives their measurements.
      * @return A new function timer.
      */
-    protected abstract <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnits);
+    protected abstract <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnit);
 
     /**
      * Build a new function counter to be added to the registry. This is guaranteed to only be called if the function counter doesn't already exist.
      *
-     * @param id The id that uniquely identifies the function counter.
+     * @param id            The id that uniquely identifies the function counter.
+     * @param obj           The state object from which the count function derives a measurement.
+     * @param countFunction A monotonically increasing count function.
+     * @param <T>           The type of the object upon which the value function derives a measurement.
      * @return A new function counter.
      */
-    protected abstract <T> FunctionCounter newFunctionCounter(Id id, T obj, ToDoubleFunction<T> valueFunction);
+    protected abstract <T> FunctionCounter newFunctionCounter(Id id, T obj, ToDoubleFunction<T> countFunction);
 
     protected List<Tag> getConventionTags(Meter.Id id) {
         return id.getConventionTags(config().namingConvention());
@@ -183,16 +205,17 @@ public abstract class MeterRegistry {
     protected abstract TimeUnit getBaseTimeUnit();
 
     /**
-     * Every custom registry implementation should define a default histogram expiry:
-     * <p>
+     * Every custom registry implementation should define a default histogram expiry at a minimum:
      * <pre>
-     * histogramConfig.builder()
-     *    .histogramExpiry(defaultStep)
+     * DistributionStatisticConfig.builder()
+     *    .expiry(defaultStep)
      *    .build()
-     *    .merge(HistogramConfig.DEFAULT);
+     *    .merge(DistributionStatisticConfig.DEFAULT);
      * </pre>
+     *
+     * @return The default distribution statistics config.
      */
-    protected abstract HistogramConfig defaultHistogramConfig();
+    protected abstract DistributionStatisticConfig defaultHistogramConfig();
 
     private String getBaseTimeUnitStr() {
         return getBaseTimeUnit().toString().toLowerCase();
@@ -224,12 +247,12 @@ public abstract class MeterRegistry {
     /**
      * Only used by {@link Timer#builder(String)}.
      *
-     * @param id              The identifier for this timer.
-     * @param histogramConfig Configuration that governs how distribution statistics are computed.
+     * @param id                          The identifier for this timer.
+     * @param distributionStatisticConfig Configuration that governs how distribution statistics are computed.
      * @return A new or existing timer.
      */
-    Timer timer(Meter.Id id, HistogramConfig histogramConfig, PauseDetector pauseDetectorOverride) {
-        return registerMeterIfNecessary(Timer.class, id, histogramConfig, (id2, filteredConfig) -> {
+    Timer timer(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetectorOverride) {
+        return registerMeterIfNecessary(Timer.class, id, distributionStatisticConfig, (id2, filteredConfig) -> {
             Meter.Id withUnit = id2.withBaseUnit(getBaseTimeUnitStr());
             return newTimer(withUnit, filteredConfig.merge(defaultHistogramConfig()), pauseDetectorOverride);
         }, NoopTimer::new);
@@ -238,13 +261,13 @@ public abstract class MeterRegistry {
     /**
      * Only used by {@link DistributionSummary#builder(String)}.
      *
-     * @param id              The identifier for this distribution summary.
-     * @param histogramConfig Configuration that governs how distribution statistics are computed.
+     * @param id                          The identifier for this distribution summary.
+     * @param distributionStatisticConfig Configuration that governs how distribution statistics are computed.
      * @return A new or existing distribution summary.
      */
-    DistributionSummary summary(Meter.Id id, HistogramConfig histogramConfig) {
-        return registerMeterIfNecessary(DistributionSummary.class, id, histogramConfig, (id2, filteredConfig) ->
-            newDistributionSummary(id2, filteredConfig.merge(defaultHistogramConfig())), NoopDistributionSummary::new);
+    DistributionSummary summary(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, double scale) {
+        return registerMeterIfNecessary(DistributionSummary.class, id, distributionStatisticConfig, (id2, filteredConfig) ->
+                newDistributionSummary(id2, filteredConfig.merge(defaultHistogramConfig()), scale), NoopDistributionSummary::new);
     }
 
     /**
@@ -290,7 +313,7 @@ public abstract class MeterRegistry {
      * @return A new search.
      */
     public Search find(String name) {
-        return new Search(this, name);
+        return Search.in(this).name(name);
     }
 
     /**
@@ -301,7 +324,7 @@ public abstract class MeterRegistry {
      * @return A new search.
      */
     public RequiredSearch get(String name) {
-        return new RequiredSearch(this, name);
+        return RequiredSearch.in(this).name(name);
     }
 
     /**
@@ -381,8 +404,8 @@ public abstract class MeterRegistry {
 
     /**
      * Register a gauge that reports the value of the object after the function
-     * {@code f} is applied. The registration will keep a weak reference to the object so it will
-     * not prevent garbage collection. Applying {@code f} on the object should be thread safe.
+     * {@code valueFunction} is applied. The registration will keep a weak reference to the object so it will
+     * not prevent garbage collection. Applying {@code valueFunction} on the object should be thread safe.
      * <p>
      * If multiple gauges are registered with the same id, then the values will be aggregated and
      * the sum will be reported. For example, registering multiple gauges for active threads in
@@ -491,66 +514,65 @@ public abstract class MeterRegistry {
         return registerMeterIfNecessary(meterClass, id, null, (id2, conf) -> builder.apply(id2), noopBuilder);
     }
 
+    @SuppressWarnings("unchecked")
     private <M extends Meter> M registerMeterIfNecessary(Class<M> meterClass, Meter.Id id,
-                                                         @Nullable HistogramConfig config, BiFunction<Meter.Id, HistogramConfig, Meter> builder,
+                                                         @Nullable DistributionStatisticConfig config, BiFunction<Meter.Id, DistributionStatisticConfig, Meter> builder,
                                                          Function<Meter.Id, M> noopBuilder) {
         Meter.Id mappedId = id;
-        for (MeterFilter filter : filters) {
-            mappedId = filter.map(mappedId);
-        }
 
-        if (!accept(id)) {
-            //noinspection unchecked
-            return noopBuilder.apply(id);
-        }
-
-        if (config != null) {
+        if (!id.isSynthetic()) {
             for (MeterFilter filter : filters) {
-                HistogramConfig filteredConfig = filter.configure(mappedId, config);
-                if (filteredConfig != null) {
-                    config = filteredConfig;
-                }
+                mappedId = filter.map(mappedId);
             }
         }
 
-        Meter m = getOrCreateMeter(config, builder, mappedId);
+        Meter m = getOrCreateMeter(config, builder, id, mappedId, noopBuilder);
 
         if (!meterClass.isInstance(m)) {
             throw new IllegalArgumentException("There is already a registered meter of a different type with the same name");
         }
 
-        //noinspection unchecked
         return (M) m;
     }
 
-    private Meter getOrCreateMeter(@Nullable HistogramConfig config,
-                                   BiFunction<Id, /*Nullable Generic*/ HistogramConfig, Meter> builder,
-                                   Id mappedId) {
+    private Meter getOrCreateMeter(@Nullable DistributionStatisticConfig config,
+                                   BiFunction<Id, /*Nullable Generic*/ DistributionStatisticConfig, Meter> builder,
+                                   Id originalId, Id mappedId, Function<Meter.Id, ? extends Meter> noopBuilder) {
         Meter m = meterMap.get(mappedId);
 
         if (m == null) {
+            if (isClosed()) {
+                return noopBuilder.apply(mappedId);
+            }
+
             synchronized (meterMapLock) {
                 m = meterMap.get(mappedId);
 
                 if (m == null) {
+                    if (!accept(originalId)) {
+                        //noinspection unchecked
+                        return noopBuilder.apply(mappedId);
+                    }
+
+                    if (config != null) {
+                        for (MeterFilter filter : filters) {
+                            DistributionStatisticConfig filteredConfig = filter.configure(mappedId, config);
+                            if (filteredConfig != null) {
+                                config = filteredConfig;
+                            }
+                        }
+                    }
+
                     m = builder.apply(mappedId, config);
-                    register(mappedId, m);
+                    meterMap = meterMap.plus(mappedId, m);
                     for (Consumer<Meter> onAdd : meterAddedListeners) {
                         onAdd.accept(m);
                     }
                 }
             }
         }
+
         return m;
-    }
-
-    private void register(Id id, Meter meter) {
-        HashMap<Id, Meter> newMeterMap = new HashMap<>();
-
-        newMeterMap.putAll(meterMap);
-        newMeterMap.put(id, meter);
-
-        meterMap = Collections.unmodifiableMap(newMeterMap);
     }
 
     private boolean accept(Meter.Id id) {
@@ -598,7 +620,6 @@ public abstract class MeterRegistry {
          * @param filter The filter to add to the registry.
          * @return This configuration instance.
          */
-        @Incubating(since = "1.0.0-rc.3")
         public Config meterFilter(MeterFilter filter) {
             filters.add(filter);
             return this;
@@ -610,7 +631,6 @@ public abstract class MeterRegistry {
          * @param meter The meter that has just been added
          * @return This configuration instance.
          */
-        @Incubating(since = "1.0.0-rc.6")
         public Config onMeterAdded(Consumer<Meter> meter) {
             meterAddedListeners.add(meter);
             return this;
@@ -647,10 +667,9 @@ public abstract class MeterRegistry {
          *
          * @param detector The pause detector to use.
          * @return This configuration instance.
-         * @see io.micrometer.core.instrument.histogram.pause.NoPauseDetector
-         * @see io.micrometer.core.instrument.histogram.pause.ClockDriftPauseDetector
+         * @see io.micrometer.core.instrument.distribution.pause.NoPauseDetector
+         * @see io.micrometer.core.instrument.distribution.pause.ClockDriftPauseDetector
          */
-        @Incubating(since = "1.0.0-rc.6")
         public Config pauseDetector(PauseDetector detector) {
             pauseDetector = detector;
             return this;
@@ -659,7 +678,6 @@ public abstract class MeterRegistry {
         /**
          * @return The pause detector that is currently in effect.
          */
-        @Incubating(since = "1.0.0-rc.6")
         public PauseDetector pauseDetector() {
             return pauseDetector;
         }
@@ -722,8 +740,10 @@ public abstract class MeterRegistry {
         /**
          * Tracks a number, maintaining a weak reference on it.
          *
-         * @param name Name of the gauge being registered.
-         * @param tags Sequence of dimensions for breaking down the name.
+         * @param name   Name of the gauge being registered.
+         * @param tags   Sequence of dimensions for breaking down the name.
+         * @param number A monotonically increasing number to track.
+         * @param <T>    The type of the state object from which the counter value is extracted.
          * @return A new or existing function counter.
          */
         public <T extends Number> FunctionCounter counter(String name, Iterable<Tag> tags, T number) {
@@ -741,7 +761,7 @@ public abstract class MeterRegistry {
          */
         <T> FunctionCounter counter(Meter.Id id, T obj, ToDoubleFunction<T> countFunction) {
             return registerMeterIfNecessary(FunctionCounter.class, id, id2 -> newFunctionCounter(id2, obj, countFunction),
-                NoopFunctionCounter::new);
+                    NoopFunctionCounter::new);
         }
 
         /**
@@ -753,6 +773,7 @@ public abstract class MeterRegistry {
          * @param countFunction         Function that produces a monotonically increasing counter value from the state object.
          * @param totalTimeFunction     Function that produces a monotonically increasing total time value from the state object.
          * @param totalTimeFunctionUnit The base unit of time produced by the total time function.
+         * @param <T>                   The type of the state object from which the function values are extracted.
          * @return A new or existing function timer.
          */
         public <T> FunctionTimer timer(String name, Iterable<Tag> tags, T obj,
@@ -760,7 +781,7 @@ public abstract class MeterRegistry {
                                        ToDoubleFunction<T> totalTimeFunction,
                                        TimeUnit totalTimeFunctionUnit) {
             return FunctionTimer.builder(name, obj, countFunction, totalTimeFunction, totalTimeFunctionUnit)
-                .tags(tags).register(MeterRegistry.this);
+                    .tags(tags).register(MeterRegistry.this);
         }
 
         /**
@@ -771,6 +792,7 @@ public abstract class MeterRegistry {
          * @param countFunction         Function that produces a monotonically increasing counter value from the state object.
          * @param totalTimeFunction     Function that produces a monotonically increasing total time value from the state object.
          * @param totalTimeFunctionUnit The base unit of time produced by the total time function.
+         * @param <T>                   The type of the state object from which the function values are extracted.F
          * @return A new or existing function timer.
          */
         <T> FunctionTimer timer(Meter.Id id, T obj,
@@ -791,6 +813,7 @@ public abstract class MeterRegistry {
          * @param obj              State object used to compute a value.
          * @param timeFunctionUnit The base unit of time produced by the total time function.
          * @param timeFunction     Function that produces a time value from the state object. This value may increase and decrease over time.
+         * @param <T>              The type of the state object from which the gauge value is extracted.
          * @return A new or existing time gauge.
          */
         public <T> TimeGauge timeGauge(String name, Iterable<Tag> tags, T obj,
@@ -805,10 +828,35 @@ public abstract class MeterRegistry {
          * @param obj              State object used to compute a value.
          * @param timeFunctionUnit The base unit of time produced by the total time function.
          * @param timeFunction     Function that produces a time value from the state object. This value may increase and decrease over time.
+         * @param <T>              The type of the state object from which the gauge value is extracted.
          * @return A new or existing time gauge.
          */
-        <T> TimeGauge timeGauge(Meter.Id id, T obj, TimeUnit timeFunctionUnit, ToDoubleFunction<T> timeFunction) {
+        <T> TimeGauge timeGauge(Meter.Id id, @Nullable T obj, TimeUnit timeFunctionUnit, ToDoubleFunction<T> timeFunction) {
             return registerMeterIfNecessary(TimeGauge.class, id, id2 -> newTimeGauge(id2, obj, timeFunctionUnit, timeFunction), NoopTimeGauge::new);
         }
+    }
+
+    /**
+     * Closes this registry, releasing any resources in the process. Once closed, this registry will no longer
+     * accept new meters and any publishing activity will cease.
+     */
+    @Override
+    public void close() {
+        if (closed.compareAndSet(false, true)) {
+            synchronized (meterMapLock) {
+                for (Meter meter : meterMap.values()) {
+                    meter.close();
+                }
+            }
+        }
+    }
+
+    /**
+     * If the registry is closed, it will no longer accept new meters and any publishing activity will cease.
+     *
+     * @return {@code true} if this registry is closed.
+     */
+    public boolean isClosed() {
+        return closed.get();
     }
 }

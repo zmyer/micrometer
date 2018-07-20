@@ -15,13 +15,17 @@
  */
 package io.micrometer.core.instrument;
 
-import io.micrometer.core.instrument.histogram.HistogramConfig;
+import io.micrometer.core.instrument.distribution.CountAtBucket;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.HistogramSupport;
+import io.micrometer.core.instrument.distribution.ValueAtPercentile;
 import io.micrometer.core.lang.Nullable;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Track the sample distribution of events. An example would be the response sizes for requests
@@ -29,7 +33,7 @@ import java.util.List;
  *
  * @author Jon Schneider
  */
-public interface DistributionSummary extends Meter {
+public interface DistributionSummary extends Meter, HistogramSupport {
 
     static Builder builder(String name) {
         return new Builder(name);
@@ -44,38 +48,67 @@ public interface DistributionSummary extends Meter {
     void record(double amount);
 
     /**
-     * The number of times that record has been called since this timer was created.
+     * @return The number of times that record has been called since this timer was created.
      */
     long count();
 
     /**
-     * The total amount of all recorded events since this summary was created.
+     * @return The total amount of all recorded events.
      */
     double totalAmount();
 
+    /**
+     * @return The distribution average for all recorded events.
+     */
     default double mean() {
         return count() == 0 ? 0 : totalAmount() / count();
     }
 
     /**
-     * The maximum time of a single event.
+     * @return The maximum time of a single event.
      */
     double max();
 
     /**
-     * The value at a specific percentile. This value is non-aggregable across dimensions.
+     * Provides cumulative histogram counts.
+     *
+     * @param value The histogram bucket to retrieve a count for.
+     * @return The count of all events less than or equal to the bucket. If value does not
+     * match a preconfigured bucket boundary, returns NaN.
+     * @deprecated Use {@link #takeSnapshot()} to retrieve bucket counts.
      */
-    double percentile(double percentile);
+    @Deprecated
+    default double histogramCountAtValue(long value) {
+        for (CountAtBucket countAtBucket : takeSnapshot().histogramCounts()) {
+            if ((long) countAtBucket.bucket(TimeUnit.NANOSECONDS) == value) {
+                return countAtBucket.count();
+            }
+        }
+        return Double.NaN;
+    }
 
-    double histogramCountAtValue(long value);
-
-    HistogramSnapshot takeSnapshot(boolean supportsAggregablePercentiles);
+    /**
+     * @param percentile A percentile in the domain [0, 1]. For example, 0.5 represents the 50th percentile of the
+     *                   distribution.
+     * @return The latency at a specific percentile. This value is non-aggregable across dimensions. Returns NaN if
+     * percentile is not a preconfigured percentile that Micrometer is tracking.
+     * @deprecated Use {@link #takeSnapshot()} to retrieve percentiles.
+     */
+    @Deprecated
+    default double percentile(double percentile) {
+        for (ValueAtPercentile valueAtPercentile : takeSnapshot().percentileValues()) {
+            if (valueAtPercentile.percentile() == percentile) {
+                return valueAtPercentile.value();
+            }
+        }
+        return Double.NaN;
+    }
 
     @Override
     default Iterable<Measurement> measure() {
         return Arrays.asList(
-            new Measurement(() -> (double) count(), Statistic.COUNT),
-            new Measurement(this::totalAmount, Statistic.TOTAL)
+                new Measurement(() -> (double) count(), Statistic.COUNT),
+                new Measurement(this::totalAmount, Statistic.TOTAL)
         );
     }
 
@@ -85,7 +118,7 @@ public interface DistributionSummary extends Meter {
     class Builder {
         private final String name;
         private final List<Tag> tags = new ArrayList<>();
-        private HistogramConfig.Builder histogramConfigBuilder = HistogramConfig.builder();
+        private DistributionStatisticConfig.Builder distributionConfigBuilder = DistributionStatisticConfig.builder();
 
         @Nullable
         private String description;
@@ -93,12 +126,15 @@ public interface DistributionSummary extends Meter {
         @Nullable
         private String baseUnit;
 
+        private double scale = 1.0;
+
         private Builder(String name) {
             this.name = name;
         }
 
         /**
          * @param tags Must be an even number of arguments representing key/value pairs of tags.
+         * @return The distribution summmary builder with added tags.
          */
         public Builder tags(String... tags) {
             return tags(Tags.of(tags));
@@ -147,15 +183,29 @@ public interface DistributionSummary extends Meter {
          * dimensions (e.g. in a different instance). Use {@link #publishPercentileHistogram()}
          * to publish a histogram that can be used to generate aggregable percentile approximations.
          *
-         * @param percentiles Percentiles to compute and publish. The 95th percentile should be expressed as {@code 95.0}
+         * @param percentiles Percentiles to compute and publish. The 95th percentile should be expressed as {@code 0.95}.
+         * @return This builder.
          */
         public Builder publishPercentiles(@Nullable double... percentiles) {
-            this.histogramConfigBuilder.percentiles(percentiles);
+            this.distributionConfigBuilder.percentiles(percentiles);
             return this;
         }
 
         /**
-         * Adds histogram buckets usable for generating aggregable percentile approximations in monitoring
+         * Determines the number of digits of precision to maintain on the dynamic range histogram used to compute
+         * percentile approximations. The higher the degrees of precision, the more accurate the approximation is at the
+         * cost of more memory.
+         *
+         * @param digitsOfPrecision The digits of precision to maintain for percentile approximations.
+         * @return This builder.
+         */
+        public Builder percentilePrecision(@Nullable Integer digitsOfPrecision) {
+            this.distributionConfigBuilder.percentilePrecision(digitsOfPrecision);
+            return this;
+        }
+
+        /**
+         * Adds histogram buckets used to generate aggregable percentile approximations in monitoring
          * systems that have query facilities to do so (e.g. Prometheus' {@code histogram_quantile},
          * Atlas' {@code :percentiles}).
          *
@@ -166,15 +216,15 @@ public interface DistributionSummary extends Meter {
         }
 
         /**
-         * Adds histogram buckets usable for generating aggregable percentile approximations in monitoring
+         * Adds histogram buckets used to generate aggregable percentile approximations in monitoring
          * systems that have query facilities to do so (e.g. Prometheus' {@code histogram_quantile},
          * Atlas' {@code :percentiles}).
          *
-         * @param enabled Value determining whether histgoram
+         * @param enabled Determines whether percentile histograms should be published.
          * @return This builder.
          */
         public Builder publishPercentileHistogram(@Nullable Boolean enabled) {
-            this.histogramConfigBuilder.percentilesHistogram(enabled);
+            this.distributionConfigBuilder.percentilesHistogram(enabled);
             return this;
         }
 
@@ -187,7 +237,7 @@ public interface DistributionSummary extends Meter {
          * @return This builder.
          */
         public Builder sla(@Nullable long... sla) {
-            this.histogramConfigBuilder.sla(sla);
+            this.distributionConfigBuilder.sla(sla);
             return this;
         }
 
@@ -199,7 +249,7 @@ public interface DistributionSummary extends Meter {
          * @return This builder.
          */
         public Builder minimumExpectedValue(@Nullable Long min) {
-            this.histogramConfigBuilder.minimumExpectedValue(min);
+            this.distributionConfigBuilder.minimumExpectedValue(min);
             return this;
         }
 
@@ -211,7 +261,7 @@ public interface DistributionSummary extends Meter {
          * @return This builder.
          */
         public Builder maximumExpectedValue(@Nullable Long max) {
-            this.histogramConfigBuilder.maximumExpectedValue(max);
+            this.distributionConfigBuilder.maximumExpectedValue(max);
             return this;
         }
 
@@ -219,13 +269,13 @@ public interface DistributionSummary extends Meter {
          * Statistics emanating from a distribution summary like max, percentiles, and histogram counts decay over time to
          * give greater weight to recent samples (exception: histogram counts are cumulative for those systems that expect cumulative
          * histogram buckets). Samples are accumulated to such statistics in ring buffers which rotate after
-         * this expiry, with a buffer length of {@link #histogramBufferLength(Integer)}.
+         * this expiry, with a buffer length of {@link #distributionStatisticBufferLength(Integer)}.
          *
          * @param expiry The amount of time samples are accumulated to a histogram before it is reset and rotated.
          * @return This builder.
          */
-        public Builder histogramExpiry(@Nullable Duration expiry) {
-            this.histogramConfigBuilder.histogramExpiry(expiry);
+        public Builder distributionStatisticExpiry(@Nullable Duration expiry) {
+            this.distributionConfigBuilder.expiry(expiry);
             return this;
         }
 
@@ -233,13 +283,24 @@ public interface DistributionSummary extends Meter {
          * Statistics emanating from a distribution summary like max, percentiles, and histogram counts decay over time to
          * give greater weight to recent samples (exception: histogram counts are cumulative for those systems that expect cumulative
          * histogram buckets). Samples are accumulated to such statistics in ring buffers which rotate after
-         * {@link #histogramExpiry(Duration)}, with this buffer length.
+         * {@link #distributionStatisticExpiry(Duration)}, with this buffer length.
          *
          * @param bufferLength The number of histograms to keep in the ring buffer.
          * @return This builder.
          */
-        public Builder histogramBufferLength(@Nullable Integer bufferLength) {
-            this.histogramConfigBuilder.histogramBufferLength(bufferLength);
+        public Builder distributionStatisticBufferLength(@Nullable Integer bufferLength) {
+            this.distributionConfigBuilder.bufferLength(bufferLength);
+            return this;
+        }
+
+        /**
+         * Multiply values recorded to the distribution summary by a scaling factor.
+         *
+         * @param scale Factor to scale each recorded value by.
+         * @return This builder.
+         */
+        public Builder scale(double scale) {
+            this.scale = scale;
             return this;
         }
 
@@ -252,7 +313,7 @@ public interface DistributionSummary extends Meter {
          * @return A new or existing distribution summary.
          */
         public DistributionSummary register(MeterRegistry registry) {
-            return registry.summary(new Meter.Id(name, tags, baseUnit, description, Type.DISTRIBUTION_SUMMARY), histogramConfigBuilder.build());
+            return registry.summary(new Meter.Id(name, tags, baseUnit, description, Type.DISTRIBUTION_SUMMARY), distributionConfigBuilder.build(), scale);
         }
     }
 

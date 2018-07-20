@@ -22,6 +22,8 @@ import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.lang.NonNullApi;
 import io.micrometer.core.lang.NonNullFields;
 import io.micrometer.core.lang.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.management.NotificationEmitter;
 import javax.management.openmbean.CompositeData;
@@ -71,11 +73,18 @@ enum GcGenerationAge {
 @NonNullApi
 @NonNullFields
 public class JvmGcMetrics implements MeterBinder {
+
+    private static final Logger logger = LoggerFactory.getLogger(JvmGcMetrics.class);
+
+    private boolean managementExtensionsPresent = isManagementExtensionsPresent();
+
+    private Iterable<Tag> tags;
+
     @Nullable
     private String youngGenPoolName;
+
     @Nullable
     private String oldGenPoolName;
-    private Iterable<Tag> tags;
 
     public JvmGcMetrics() {
         this(emptyList());
@@ -118,75 +127,90 @@ public class JvmGcMetrics implements MeterBinder {
             .description("Incremented for an increase in the size of the young generation memory pool after one GC to before the next")
             .register(registry);
 
-        // start watching for GC notifications
-        final AtomicLong youngGenSizeAfter = new AtomicLong(0L);
+        if (this.managementExtensionsPresent) {
+            // start watching for GC notifications
+            final AtomicLong youngGenSizeAfter = new AtomicLong(0L);
 
-        for (GarbageCollectorMXBean mbean : ManagementFactory.getGarbageCollectorMXBeans()) {
-            if (mbean instanceof NotificationEmitter) {
-                ((NotificationEmitter) mbean).addNotificationListener((notification, ref) -> {
-                    final String type = notification.getType();
-                    if (type.equals(GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION)) {
-                        CompositeData cd = (CompositeData) notification.getUserData();
-                        GarbageCollectionNotificationInfo notificationInfo = GarbageCollectionNotificationInfo.from(cd);
+            for (GarbageCollectorMXBean mbean : ManagementFactory.getGarbageCollectorMXBeans()) {
+                if (mbean instanceof NotificationEmitter) {
+                    ((NotificationEmitter) mbean).addNotificationListener((notification, ref) -> {
+                        final String type = notification.getType();
+                        if (type.equals(GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION)) {
+                            CompositeData cd = (CompositeData) notification.getUserData();
+                            GarbageCollectionNotificationInfo notificationInfo = GarbageCollectionNotificationInfo.from(cd);
 
-                        if (isConcurrentPhase(notificationInfo)) {
-                            Timer.builder("jvm.gc.concurrent.phase.time")
-                                .tags(tags)
-                                .tags("action", notificationInfo.getGcAction(), "cause", notificationInfo.getGcCause())
-                                .description("Time spent in concurrent phase")
-                                .register(registry)
-                                .record(notificationInfo.getGcInfo().getDuration(), TimeUnit.MILLISECONDS);
-                        } else {
-                            Timer.builder("jvm.gc.pause")
-                                .tags(tags)
-                                .tags("action", notificationInfo.getGcAction(),
-                                    "cause", notificationInfo.getGcCause())
-                                .description("Time spent in GC pause")
-                                .register(registry)
-                                .record(notificationInfo.getGcInfo().getDuration(), TimeUnit.MILLISECONDS);
-                        }
-
-                        GcInfo gcInfo = notificationInfo.getGcInfo();
-
-                        // Update promotion and allocation counters
-                        final Map<String, MemoryUsage> before = gcInfo.getMemoryUsageBeforeGc();
-                        final Map<String, MemoryUsage> after = gcInfo.getMemoryUsageAfterGc();
-
-                        if (oldGenPoolName != null) {
-                            final long oldBefore = before.get(oldGenPoolName).getUsed();
-                            final long oldAfter = after.get(oldGenPoolName).getUsed();
-                            final long delta = oldAfter - oldBefore;
-                            if (delta > 0L) {
-                                promotedBytes.increment(delta);
+                            if (isConcurrentPhase(notificationInfo.getGcCause())) {
+                                Timer.builder("jvm.gc.concurrent.phase.time")
+                                        .tags(tags)
+                                        .tags("action", notificationInfo.getGcAction(), "cause", notificationInfo.getGcCause())
+                                        .description("Time spent in concurrent phase")
+                                        .register(registry)
+                                        .record(notificationInfo.getGcInfo().getDuration(), TimeUnit.MILLISECONDS);
+                            } else {
+                                Timer.builder("jvm.gc.pause")
+                                        .tags(tags)
+                                        .tags("action", notificationInfo.getGcAction(),
+                                                "cause", notificationInfo.getGcCause())
+                                        .description("Time spent in GC pause")
+                                        .register(registry)
+                                        .record(notificationInfo.getGcInfo().getDuration(), TimeUnit.MILLISECONDS);
                             }
 
-                            // Some GC implementations such as G1 can reduce the old gen size as part of a minor GC. To track the
-                            // live data size we record the value if we see a reduction in the old gen heap size or
-                            // after a major GC.
-                            if (oldAfter < oldBefore || GcGenerationAge.fromName(notificationInfo.getGcName()) == GcGenerationAge.OLD) {
-                                liveDataSize.set(oldAfter);
-                                final long oldMaxAfter = after.get(oldGenPoolName).getMax();
-                                maxDataSize.set(oldMaxAfter);
-                            }
-                        }
+                            GcInfo gcInfo = notificationInfo.getGcInfo();
 
-                        if (youngGenPoolName != null) {
-                            final long youngBefore = before.get(youngGenPoolName).getUsed();
-                            final long youngAfter = after.get(youngGenPoolName).getUsed();
-                            final long delta = youngBefore - youngGenSizeAfter.get();
-                            youngGenSizeAfter.set(youngAfter);
-                            if (delta > 0L) {
-                                allocatedBytes.increment(delta);
+                            // Update promotion and allocation counters
+                            final Map<String, MemoryUsage> before = gcInfo.getMemoryUsageBeforeGc();
+                            final Map<String, MemoryUsage> after = gcInfo.getMemoryUsageAfterGc();
+
+                            if (oldGenPoolName != null) {
+                                final long oldBefore = before.get(oldGenPoolName).getUsed();
+                                final long oldAfter = after.get(oldGenPoolName).getUsed();
+                                final long delta = oldAfter - oldBefore;
+                                if (delta > 0L) {
+                                    promotedBytes.increment(delta);
+                                }
+
+                                // Some GC implementations such as G1 can reduce the old gen size as part of a minor GC. To track the
+                                // live data size we record the value if we see a reduction in the old gen heap size or
+                                // after a major GC.
+                                if (oldAfter < oldBefore || GcGenerationAge.fromName(notificationInfo.getGcName()) == GcGenerationAge.OLD) {
+                                    liveDataSize.set(oldAfter);
+                                    final long oldMaxAfter = after.get(oldGenPoolName).getMax();
+                                    maxDataSize.set(oldMaxAfter);
+                                }
+                            }
+
+                            if (youngGenPoolName != null) {
+                                final long youngBefore = before.get(youngGenPoolName).getUsed();
+                                final long youngAfter = after.get(youngGenPoolName).getUsed();
+                                final long delta = youngBefore - youngGenSizeAfter.get();
+                                youngGenSizeAfter.set(youngAfter);
+                                if (delta > 0L) {
+                                    allocatedBytes.increment(delta);
+                                }
                             }
                         }
-                    }
-                }, null, null);
+                    }, null, null);
+                }
             }
         }
     }
 
-    private boolean isConcurrentPhase(GarbageCollectionNotificationInfo info) {
-        return "No GC".equals(info.getGcCause());
+    private static boolean isManagementExtensionsPresent() {
+        try {
+            Class.forName("com.sun.management.GarbageCollectionNotificationInfo", false,
+                JvmGcMetrics.class.getClassLoader());
+            return true;
+        } catch (Throwable e) {
+            // We are operating in a JVM without access to this level of detail
+            logger.warn("GC notifications will not be available because " +
+                "com.sun.management.GarbageCollectionNotificationInfo is not present");
+            return false;
+        }
+    }
+
+    private boolean isConcurrentPhase(String cause) {
+        return "No GC".equals(cause);
     }
 
     private boolean isOldGenPool(String name) {

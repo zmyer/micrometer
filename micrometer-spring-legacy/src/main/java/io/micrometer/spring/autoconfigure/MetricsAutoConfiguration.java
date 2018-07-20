@@ -18,18 +18,15 @@ package io.micrometer.spring.autoconfigure;
 import io.micrometer.core.annotation.Timed;
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.binder.hystrix.HystrixMetricsBinder;
 import io.micrometer.spring.PropertiesMeterFilter;
-import io.micrometer.spring.autoconfigure.export.CompositeMeterRegistryConfiguration;
 import io.micrometer.spring.autoconfigure.jersey2.server.JerseyServerMetricsConfiguration;
-import io.micrometer.spring.autoconfigure.web.client.RestTemplateMetricsConfiguration;
 import io.micrometer.spring.autoconfigure.web.servlet.ServletMetricsConfiguration;
 import io.micrometer.spring.autoconfigure.web.tomcat.TomcatMetricsConfiguration;
 import io.micrometer.spring.integration.SpringIntegrationMetrics;
 import io.micrometer.spring.scheduling.ScheduledMethodMetrics;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
+import org.springframework.boot.autoconfigure.AutoConfigureBefore;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.cache.CacheAutoConfiguration;
@@ -39,14 +36,13 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.SearchStrategy;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.annotation.Order;
 import org.springframework.integration.config.EnableIntegrationManagement;
 import org.springframework.integration.support.management.IntegrationManagementConfigurer;
-
-import java.util.Collection;
 
 /**
  * {@link EnableAutoConfiguration} for Micrometer-based metrics.
@@ -57,24 +53,19 @@ import java.util.Collection;
 @ConditionalOnClass(Timed.class)
 @EnableConfigurationProperties(MetricsProperties.class)
 @Import({
-    // default binders
-    MeterBindersConfiguration.class,
+        // default binders
+        MeterBindersConfiguration.class,
 
-    // default instrumentation
-    ServletMetricsConfiguration.class, RestTemplateMetricsConfiguration.class,
-    TomcatMetricsConfiguration.class, JerseyServerMetricsConfiguration.class,
-
-    // registry implementations
-    MeterRegistriesConfiguration.class,
-
-    // conditionally build a composite registry out of more than one registry present
-    CompositeMeterRegistryConfiguration.class
+        // default instrumentation
+        ServletMetricsConfiguration.class, TomcatMetricsConfiguration.class,
+        JerseyServerMetricsConfiguration.class,
 })
 @AutoConfigureAfter({
-    DataSourceAutoConfiguration.class,
-    RabbitAutoConfiguration.class,
-    CacheAutoConfiguration.class
+        DataSourceAutoConfiguration.class,
+        RabbitAutoConfiguration.class,
+        CacheAutoConfiguration.class
 })
+@AutoConfigureBefore(CompositeMeterRegistryAutoConfiguration.class)
 public class MetricsAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
@@ -83,10 +74,8 @@ public class MetricsAutoConfiguration {
     }
 
     @Bean
-    public static MeterRegistryPostProcessor meterRegistryPostProcessor(ObjectProvider<Collection<MeterBinder>> binders,
-                                                                        ObjectProvider<Collection<MeterRegistryCustomizer<?>>> customizers,
-                                                                        MetricsProperties properties) {
-        return new MeterRegistryPostProcessor(binders, customizers, properties.isUseGlobalRegistry());
+    public static MeterRegistryPostProcessor meterRegistryPostProcessor(ApplicationContext context) {
+        return new MeterRegistryPostProcessor(context);
     }
 
     @Bean
@@ -95,9 +84,7 @@ public class MetricsAutoConfiguration {
         return r -> r.config().meterFilter(new PropertiesMeterFilter(props));
     }
 
-    /**
-     * If AOP is not enabled, scheduled interception will not work.
-     */
+    // If AOP is not enabled, scheduled interception will not work.
     @Bean
     @ConditionalOnClass(name = "org.aspectj.lang.ProceedingJoinPoint")
     @ConditionalOnProperty(value = "spring.aop.enabled", havingValue = "true", matchIfMissing = true)
@@ -107,11 +94,14 @@ public class MetricsAutoConfiguration {
 
     @Bean
     @ConditionalOnClass(name = "com.netflix.hystrix.strategy.HystrixPlugins")
-    @ConditionalOnProperty(value = "management.metrics.export.hystrix.enabled", matchIfMissing = true)
+    @ConditionalOnProperty(value = "management.metrics.binders.hystrix.enabled", matchIfMissing = true)
     public HystrixMetricsBinder hystrixMetricsBinder() {
         return new HystrixMetricsBinder();
     }
 
+    /**
+     * Replaced by built-in Micrometer integration starting in Spring Integration 5.0.2.
+     */
     @Configuration
     @ConditionalOnClass(EnableIntegrationManagement.class)
     static class MetricsIntegrationConfiguration {
@@ -127,7 +117,7 @@ public class MetricsAutoConfiguration {
 
         @Bean
         public SpringIntegrationMetrics springIntegrationMetrics(
-            IntegrationManagementConfigurer configurer) {
+                IntegrationManagementConfigurer configurer) {
             return new SpringIntegrationMetrics(configurer);
         }
     }

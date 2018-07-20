@@ -4,14 +4,19 @@ plugins {
 
 dependencyManagement {
     imports {
-        mavenBom 'org.springframework.boot:spring-boot-dependencies:1.5.4.RELEASE'
+        mavenBom 'org.springframework.boot:spring-boot-dependencies:1.5.10.RELEASE'
+    }
+    dependencies {
+        // not necessary in real Boot 1.5.x apps because reactor is shaded inside the
+        // published version of micrometer-registry-statsd
+        dependency 'io.projectreactor:reactor-core:3.1.4.RELEASE'
     }
 }
 
 dependencies {
     compile project(':micrometer-spring-legacy')
 
-    ['atlas', 'prometheus', 'datadog', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx'].each { sys ->
+    ['atlas', 'prometheus', 'datadog', 'elastic', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx', 'wavefront'].each { sys ->
         compile project(":micrometer-registry-$sys")
     }
 
@@ -20,5 +25,4 @@ dependencies {
     compile 'org.springframework.integration:spring-integration-java-dsl'
     compile 'org.springframework.integration:spring-integration-ws'
     compile 'org.springframework.integration:spring-integration-xml'
-    compile 'com.netflix.hystrix:hystrix-javanica:1.5.8'
 }

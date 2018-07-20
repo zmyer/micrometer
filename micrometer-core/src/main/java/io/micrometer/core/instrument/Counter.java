@@ -22,7 +22,10 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Used to measure the rate of change based on calls to increment.
+ * Counters monitor monotonically increasing values. Counters may never be reset to a lesser value. If you
+ * need to track a value that goes up and down, use a {@link Gauge}.
+ *
+ * @author Jon Schneider
  */
 public interface Counter extends Meter {
     static Builder builder(String name) {
@@ -44,18 +47,13 @@ public interface Counter extends Meter {
     void increment(double amount);
 
     /**
-     * The cumulative count since this counter was created.
+     * @return The cumulative count since this counter was created.
      */
     double count();
 
     @Override
     default Iterable<Measurement> measure() {
         return Collections.singletonList(new Measurement(this::count, Statistic.COUNT));
-    }
-
-    @Override
-    default Type type() {
-        return Type.COUNTER;
     }
 
     /**
@@ -77,6 +75,7 @@ public interface Counter extends Meter {
 
         /**
          * @param tags Must be an even number of arguments representing key/value pairs of tags.
+         * @return The counter builder with added tags.
          */
         public Builder tags(String... tags) {
             return tags(Tags.of(tags));

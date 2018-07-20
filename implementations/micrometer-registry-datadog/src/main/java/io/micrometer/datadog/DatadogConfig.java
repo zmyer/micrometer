@@ -15,11 +15,12 @@
  */
 package io.micrometer.datadog;
 
+import io.micrometer.core.instrument.config.MissingRequiredConfigurationException;
 import io.micrometer.core.instrument.step.StepRegistryConfig;
 import io.micrometer.core.lang.Nullable;
 
 /**
- * Configuration for Datadog exporting.
+ * Configuration for {@link DatadogMeterRegistry}.
  *
  * @author Jon Schneider
  */
@@ -36,18 +37,22 @@ public interface DatadogConfig extends StepRegistryConfig {
 
     default String apiKey() {
         String v = get(prefix() + ".apiKey");
-        if(v == null)
-            throw new IllegalStateException(prefix() + ".apiKey must be set to report metrics to Datadog");
+        if (v == null)
+            throw new MissingRequiredConfigurationException("apiKey must be set to report metrics to Datadog");
         return v;
     }
 
+    /**
+     * @return The Datadog application key. This is only required if you care for metadata like base units, description,
+     * and meter type to be published to Datadog.
+     */
     @Nullable
     default String applicationKey() {
         return get(prefix() + ".applicationKey");
     }
 
     /**
-     * The tag that will be mapped to "host" when shipping metrics to datadog, or {@code null} if
+     * @return The tag that will be mapped to "host" when shipping metrics to datadog, or {@code null} if
      * host should be omitted on publishing.
      */
     @Nullable
@@ -57,22 +62,20 @@ public interface DatadogConfig extends StepRegistryConfig {
     }
 
     /**
-     * The URI to ship metrics to. If you need to publish metrics to an internal proxy en route to
+     * @return The URI to ship metrics to. If you need to publish metrics to an internal proxy en route to
      * datadoghq, you can define the location of the proxy with this.
      */
     default String uri() {
-        String v = get(prefix() + ".apiHost");
+        String v = get(prefix() + ".uri");
         return v == null ? "https://app.datadoghq.com" : v;
     }
 
     /**
-     * {@code true} if meter descriptions should be sent to Datadog.
+     * @return {@code true} if meter descriptions should be sent to Datadog.
      * Turn this off to minimize the amount of data sent on each scrape.
      */
     default boolean descriptions() {
         String v = get(prefix() + ".descriptions");
         return v == null || Boolean.valueOf(v);
     }
-
-
 }

@@ -53,8 +53,22 @@ class InfluxPropertiesConfigAdapter extends StepRegistryPropertiesConfigAdapter<
 
     @Override
     public String retentionPolicy() {
-        return get(InfluxProperties::getRetentionPolicy,
-            InfluxConfig.super::retentionPolicy);
+        return get(InfluxProperties::getRetentionPolicy, InfluxConfig.super::retentionPolicy);
+    }
+
+    @Override
+    public Integer retentionReplicationFactor() {
+        return get(InfluxProperties::getRetentionReplicationFactor, InfluxConfig.super::retentionReplicationFactor);
+    }
+
+    @Override
+    public String retentionDuration() {
+        return get(InfluxProperties::getRetentionDuration, InfluxConfig.super::retentionDuration);
+    }
+
+    @Override
+    public String retentionShardDuration() {
+        return get(InfluxProperties::getRetentionShardDuration, InfluxConfig.super::retentionShardDuration);
     }
 
     @Override
@@ -67,4 +81,8 @@ class InfluxPropertiesConfigAdapter extends StepRegistryPropertiesConfigAdapter<
         return get(InfluxProperties::getCompressed, InfluxConfig.super::compressed);
     }
 
+    @Override
+    public boolean autoCreateDb() {
+        return get(InfluxProperties::getAutoCreateDb, InfluxConfig.super::autoCreateDb);
+    }
 }

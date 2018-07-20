@@ -15,12 +15,10 @@
  */
 package io.micrometer.spring.autoconfigure;
 
-import io.micrometer.core.instrument.DistributionSummary;
-import io.micrometer.core.instrument.Timer;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-import java.time.Duration;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -31,14 +29,13 @@ import java.util.Map;
 @ConfigurationProperties("management.metrics")
 public class MetricsProperties {
 
-    private Web web = new Web();
-    private Summaries summaries = new Summaries();
-    private Timers timers = new Timers();
+    private final Web web = new Web();
+    private final Distribution distribution = new Distribution();
 
     /**
      * If {@code false}, the matching meter(s) are no-op.
      */
-    private Map<String, Boolean> enabled = new HashMap<>();
+    private final Map<String, Boolean> enable = new HashMap<>();
 
     /**
      * Whether or not auto-configured MeterRegistry implementations should be bound to the
@@ -59,54 +56,26 @@ public class MetricsProperties {
         return this.web;
     }
 
-    public void setWeb(Web web) {
-        this.web = web;
+    public Map<String, Boolean> getEnable() {
+        return enable;
     }
 
-    public Summaries getSummaries() {
-        return summaries;
-    }
-
-    public void setSummaries(Summaries summaries) {
-        this.summaries = summaries;
-    }
-
-    public Timers getTimers() {
-        return timers;
-    }
-
-    public void setTimers(Timers timers) {
-        this.timers = timers;
-    }
-
-    public Map<String, Boolean> getEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(Map<String, Boolean> enabled) {
-        this.enabled = enabled;
+    public Distribution getDistribution() {
+        return distribution;
     }
 
     public static class Web {
 
-        private Client client = new Client();
+        private final Client client = new Client();
 
-        private Server server = new Server();
+        private final Server server = new Server();
 
         public Client getClient() {
             return this.client;
         }
 
-        public void setClient(Client client) {
-            this.client = client;
-        }
-
         public Server getServer() {
             return this.server;
-        }
-
-        public void setServer(Server server) {
-            this.server = server;
         }
 
         public static class Client {
@@ -171,158 +140,43 @@ public class MetricsProperties {
         }
     }
 
-    /**
-     * Properties common to "distribution" style meters - timers and distribution summaries.
-     */
-    static abstract class AbstractDistributions {
-        /**
-         * Controls whether to publish a histogram structure for those monitoring systems that support
-         * aggregable percentile calculation based on a histogram. For other systems, this has no effect.
-         */
-        private Map<String, Boolean> percentileHistogram = new HashMap<>();
+    public static class Distribution {
 
         /**
-         * The set of Micrometer-computed non-aggregable percentiles to ship to the backend. Percentiles should
-         * be defined in the range of (0, 1]. For example, 0.999 represents the 99.9th percentile of the distribution.
+         * Whether meter IDs starting-with the specified name should be publish percentile
+         * histograms. Monitoring systems that support aggregable percentile calculation
+         * based on a histogram be set to true. For other systems, this has no effect. The
+         * longest match wins, the key `all` can also be used to configure all meters.
          */
-        private Map<String, double[]> percentiles = new HashMap<>();
+        private final Map<String, Boolean> percentilesHistogram = new LinkedHashMap<>();
 
         /**
-         * Statistics emanating from a distribution like max, percentiles, and histogram counts decay over time to
-         * give greater weight to recent samples (exception: histogram counts are cumulative for those systems that expect cumulative
-         * histogram buckets). Samples are accumulated to such statistics in ring buffers which rotate after
-         * this expiry, with a buffer length of {@link #histogramBufferLength}.
+         * Specific computed non-aggregable percentiles to ship to the backend for meter
+         * IDs starting-with the specified name. The longest match wins, the key `all` can
+         * also be used to configure all meters.
          */
-        private Map<String, Duration> histogramExpiry = new HashMap<>();
+        private final Map<String, double[]> percentiles = new LinkedHashMap<>();
 
         /**
-         * Statistics emanating from a distribution like max, percentiles, and histogram counts decay over time to
-         * give greater weight to recent samples (exception: histogram counts are cumulative for those systems that expect cumulative
-         * histogram buckets). Samples are accumulated to such statistics in ring buffers which rotate after
-         * {@link #histogramExpiry}, with this buffer length.
+         * Specific SLA boundaries for meter IDs starting-with the specified name. The
+         * longest match wins, the key `all` can also be used to configure all meters.
+         * Counters will be published for each specified boundary. Values can be
+         * specified as a long or as a Duration value (for timer meters, defaulting to ms
+         * if no unit specified).
          */
-        private Map<String, Integer> histogramBufferLength = new HashMap<>();
+        private final Map<String, ServiceLevelAgreementBoundary[]> sla = new LinkedHashMap<>();
 
-        public Map<String, Boolean> getPercentileHistogram() {
-            return percentileHistogram;
-        }
-
-        public void setPercentileHistogram(Map<String, Boolean> percentileHistogram) {
-            this.percentileHistogram = percentileHistogram;
+        public Map<String, Boolean> getPercentilesHistogram() {
+            return this.percentilesHistogram;
         }
 
         public Map<String, double[]> getPercentiles() {
-            return percentiles;
+            return this.percentiles;
         }
 
-        public void setPercentiles(Map<String, double[]> percentiles) {
-            this.percentiles = percentiles;
+        public Map<String, ServiceLevelAgreementBoundary[]> getSla() {
+            return this.sla;
         }
 
-        public Map<String, Duration> getHistogramExpiry() {
-            return histogramExpiry;
-        }
-
-        public void setHistogramExpiry(Map<String, Duration> histogramExpiry) {
-            this.histogramExpiry = histogramExpiry;
-        }
-
-        public Map<String, Integer> getHistogramBufferLength() {
-            return histogramBufferLength;
-        }
-
-        public void setHistogramBufferLength(Map<String, Integer> histogramBufferLength) {
-            this.histogramBufferLength = histogramBufferLength;
-        }
-    }
-
-    public static class Summaries extends AbstractDistributions {
-        /**
-         * Clamps {@link DistributionSummary} to the first percentile bucket greater than
-         * or equal to the supplied value. Use this property to control the number of histogram buckets used
-         * to represent a distribution.
-         */
-        private Map<String, Long> minimumExpectedValue = new HashMap<>();
-
-        /**
-         * Clamps {@link DistributionSummary} to the percentile buckets less than
-         * or equal to the supplied value. Use this property to control the number of histogram buckets used
-         * to represent a distribution.
-         */
-        private Map<String, Long> maximumExpectedValue = new HashMap<>();
-
-        /**
-         * Publish a counter for each SLA boundary that counts violations of the SLA.
-         */
-        private Map<String, long[]> sla = new HashMap<>();
-
-        public Map<String, Long> getMinimumExpectedValue() {
-            return minimumExpectedValue;
-        }
-
-        public void setMinimumExpectedValue(Map<String, Long> minimumExpectedValue) {
-            this.minimumExpectedValue = minimumExpectedValue;
-        }
-
-        public Map<String, Long> getMaximumExpectedValue() {
-            return maximumExpectedValue;
-        }
-
-        public void setMaximumExpectedValue(Map<String, Long> maximumExpectedValue) {
-            this.maximumExpectedValue = maximumExpectedValue;
-        }
-
-        public Map<String, long[]> getSla() {
-            return sla;
-        }
-
-        public void setSla(Map<String, long[]> sla) {
-            this.sla = sla;
-        }
-    }
-
-    public static class Timers extends AbstractDistributions {
-        /**
-         * Clamps {@link Timer} to the first percentile bucket greater than
-         * or equal to the supplied value. Use this property to control the number of histogram buckets used
-         * to represent a distribution.
-         */
-        Map<String, Duration> minimumExpectedValue = new HashMap<>();
-
-        /**
-         * Clamps {@link Timer} to the percentile buckets less than
-         * or equal to the supplied value. Use this property to control the number of histogram buckets used
-         * to represent a distribution.
-         */
-        Map<String, Duration> maximumExpectedValue = new HashMap<>();
-
-        /**
-         * Publish a counter for each SLA boundary that counts violations of the SLA.
-         */
-        Map<String, Duration[]> sla = new HashMap<>();
-
-        public Map<String, Duration> getMinimumExpectedValue() {
-            return minimumExpectedValue;
-        }
-
-        public void setMinimumExpectedValue(Map<String, Duration> minimumExpectedValue) {
-            this.minimumExpectedValue = minimumExpectedValue;
-        }
-
-        public Map<String, Duration> getMaximumExpectedValue() {
-            return maximumExpectedValue;
-        }
-
-        public void setMaximumExpectedValue(Map<String, Duration> maximumExpectedValue) {
-            this.maximumExpectedValue = maximumExpectedValue;
-        }
-
-        public Map<String, Duration[]> getSla() {
-            return sla;
-        }
-
-        public void setSla(Map<String, Duration[]> sla) {
-            this.sla = sla;
-        }
     }
 }

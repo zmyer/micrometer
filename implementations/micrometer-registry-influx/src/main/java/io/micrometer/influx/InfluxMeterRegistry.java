@@ -16,21 +16,24 @@
 package io.micrometer.influx;
 
 import io.micrometer.core.instrument.*;
-import io.micrometer.core.instrument.config.NamingConvention;
 import io.micrometer.core.instrument.step.StepMeterRegistry;
+import io.micrometer.core.instrument.util.DoubleFormat;
+import io.micrometer.core.instrument.util.HttpContentCoding;
+import io.micrometer.core.instrument.util.HttpHeader;
+import io.micrometer.core.instrument.util.HttpMethod;
+import io.micrometer.core.instrument.util.IOUtils;
+import io.micrometer.core.instrument.util.MediaType;
 import io.micrometer.core.instrument.util.MeterPartition;
+import io.micrometer.core.instrument.util.StringUtils;
 import io.micrometer.core.lang.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.OutputStream;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
 import java.util.Base64;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -46,11 +49,11 @@ import static java.util.stream.Collectors.toList;
 public class InfluxMeterRegistry extends StepMeterRegistry {
     private final InfluxConfig config;
     private final Logger logger = LoggerFactory.getLogger(InfluxMeterRegistry.class);
-    private final DecimalFormat format = new DecimalFormat("#.####", DecimalFormatSymbols.getInstance(Locale.ENGLISH));
+    private boolean databaseExists = false;
 
     public InfluxMeterRegistry(InfluxConfig config, Clock clock, ThreadFactory threadFactory) {
         super(config, clock);
-        this.config().namingConvention(new InfluxNamingConvention(NamingConvention.snakeCase));
+        this.config().namingConvention(new InfluxNamingConvention());
         this.config = config;
         start(threadFactory);
     }
@@ -60,27 +63,36 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
     }
 
     private void createDatabaseIfNecessary() {
+        if (!config.autoCreateDb() || databaseExists)
+            return;
+
         HttpURLConnection con = null;
         try {
-            URL queryEndpoint = URI.create(config.uri() + "/query?q=" + URLEncoder.encode("CREATE DATABASE \"" + config.db() + "\"", "UTF-8")).toURL();
+            String createDatabaseQuery = new CreateDatabaseQueryBuilder(config.db()).setRetentionDuration(config.retentionDuration())
+					.setRetentionPolicyName(config.retentionPolicy())
+					.setRetentionReplicationFactor(config.retentionReplicationFactor())
+					.setRetentionShardDuration(config.retentionShardDuration()).build();
+
+            URL queryEndpoint = URI.create(config.uri() + "/query?q=" + URLEncoder.encode(createDatabaseQuery, "UTF-8")).toURL();
 
             con = (HttpURLConnection) queryEndpoint.openConnection();
             con.setConnectTimeout((int) config.connectTimeout().toMillis());
             con.setReadTimeout((int) config.readTimeout().toMillis());
-            con.setRequestMethod("POST");
+            con.setRequestMethod(HttpMethod.POST);
+            authenticateRequest(con);
 
             int status = con.getResponseCode();
 
             if (status >= 200 && status < 300) {
                 logger.debug("influx database {} is ready to receive metrics", config.db());
+                databaseExists = true;
             } else if (status >= 400) {
-                try (InputStream in = con.getErrorStream()) {
-                    logger.error("unable to create database '{}': {}", config.db(), new BufferedReader(new InputStreamReader(in))
-                        .lines().collect(joining("\n")));
+                if (logger.isErrorEnabled()) {
+                    logger.error("unable to create database '{}': {}", config.db(), IOUtils.toString(con.getErrorStream()));
                 }
             }
-        } catch (IOException e) {
-            logger.warn("unable to create database '{}'", config.db(), e);
+        } catch (Throwable e) {
+            logger.error("unable to create database '{}'", config.db(), e);
         } finally {
             quietlyCloseUrlConnection(con);
         }
@@ -92,7 +104,7 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
 
         try {
             String write = "/write?consistency=" + config.consistency().toString().toLowerCase() + "&precision=ms&db=" + config.db();
-            if (config.retentionPolicy() != null) {
+            if (StringUtils.isNotBlank(config.retentionPolicy())) {
                 write += "&rp=" + config.retentionPolicy();
             }
             URL influxEndpoint = URI.create(config.uri() + write).toURL();
@@ -103,50 +115,46 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
                     con = (HttpURLConnection) influxEndpoint.openConnection();
                     con.setConnectTimeout((int) config.connectTimeout().toMillis());
                     con.setReadTimeout((int) config.readTimeout().toMillis());
-                    con.setRequestMethod("POST");
-                    con.setRequestProperty("Content-Type", "plain/text");
+                    con.setRequestMethod(HttpMethod.POST);
+                    con.setRequestProperty(HttpHeader.CONTENT_TYPE, MediaType.PLAIN_TEXT);
                     con.setDoOutput(true);
 
-                    if (config.userName() != null && config.password() != null) {
-                        String encoded = Base64.getEncoder().encodeToString((config.userName() + ":" +
-                            config.password()).getBytes(StandardCharsets.UTF_8));
-                        con.setRequestProperty("Authorization", "Basic " + encoded);
-                    }
+                    authenticateRequest(con);
 
                     List<String> bodyLines = batch.stream()
-                        .map(m -> {
-                            if (m instanceof Timer) {
-                                return writeTimer((Timer) m);
-                            }
-                            if (m instanceof DistributionSummary) {
-                                return writeSummary((DistributionSummary) m);
-                            }
-                            if (m instanceof FunctionTimer) {
-                                return writeTimer((FunctionTimer) m);
-                            }
-                            if (m instanceof TimeGauge) {
-                                return writeGauge(m.getId(), ((TimeGauge) m).value(getBaseTimeUnit()));
-                            }
-                            if (m instanceof Gauge) {
-                                return writeGauge(m.getId(), ((Gauge) m).value());
-                            }
-                            if (m instanceof FunctionCounter) {
-                                return writeCounter(m.getId(), ((FunctionCounter) m).count());
-                            }
-                            if (m instanceof Counter) {
-                                return writeCounter(m.getId(), ((Counter) m).count());
-                            }
-                            if (m instanceof LongTaskTimer) {
-                                return writeLongTaskTimer((LongTaskTimer) m);
-                            }
-                            return writeMeter(m);
-                        })
-                        .collect(toList());
+                            .flatMap(m -> {
+                                if (m instanceof Timer) {
+                                    return writeTimer((Timer) m);
+                                }
+                                if (m instanceof DistributionSummary) {
+                                    return writeSummary((DistributionSummary) m);
+                                }
+                                if (m instanceof FunctionTimer) {
+                                    return writeTimer((FunctionTimer) m);
+                                }
+                                if (m instanceof TimeGauge) {
+                                    return writeGauge(m.getId(), ((TimeGauge) m).value(getBaseTimeUnit()));
+                                }
+                                if (m instanceof Gauge) {
+                                    return writeGauge(m.getId(), ((Gauge) m).value());
+                                }
+                                if (m instanceof FunctionCounter) {
+                                    return writeCounter(m.getId(), ((FunctionCounter) m).count());
+                                }
+                                if (m instanceof Counter) {
+                                    return writeCounter(m.getId(), ((Counter) m).count());
+                                }
+                                if (m instanceof LongTaskTimer) {
+                                    return writeLongTaskTimer((LongTaskTimer) m);
+                                }
+                                return writeMeter(m);
+                            })
+                            .collect(toList());
 
                     String body = String.join("\n", bodyLines);
 
                     if (config.compressed())
-                        con.setRequestProperty("Content-Encoding", "gzip");
+                        con.setRequestProperty(HttpHeader.CONTENT_ENCODING, HttpContentCoding.GZIP);
 
                     try (OutputStream os = con.getOutputStream()) {
                         if (config.compressed()) {
@@ -164,13 +172,13 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
 
                     if (status >= 200 && status < 300) {
                         logger.info("successfully sent {} metrics to influx", batch.size());
+                        databaseExists = true;
                     } else if (status >= 400) {
-                        try (InputStream in = con.getErrorStream()) {
-                            logger.error("failed to send metrics: " + new BufferedReader(new InputStreamReader(in))
-                                .lines().collect(joining("\n")));
+                        if (logger.isErrorEnabled()) {
+                            logger.error("failed to send metrics: {}", IOUtils.toString(con.getErrorStream()));
                         }
                     } else {
-                        logger.error("failed to send metrics: http " + status);
+                        logger.error("failed to send metrics: http {}", status);
                     }
 
                 } finally {
@@ -180,7 +188,15 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
         } catch (MalformedURLException e) {
             throw new IllegalArgumentException("Malformed InfluxDB publishing endpoint, see '" + config.prefix() + ".uri'", e);
         } catch (Throwable e) {
-            logger.warn("failed to send metrics", e);
+            logger.error("failed to send metrics", e);
+        }
+    }
+
+    private void authenticateRequest(HttpURLConnection con) {
+        if (config.userName() != null && config.password() != null) {
+            String encoded = Base64.getEncoder().encodeToString((config.userName() + ":" +
+                    config.password()).getBytes(StandardCharsets.UTF_8));
+            con.setRequestProperty(HttpHeader.AUTHORIZATION, "Basic " + encoded);
         }
     }
 
@@ -204,94 +220,85 @@ public class InfluxMeterRegistry extends StepMeterRegistry {
 
         @Override
         public String toString() {
-            return key + "=" + format.format(value);
+            return key + "=" + DoubleFormat.decimalOrNan(value);
         }
     }
 
-    private String writeMeter(Meter m) {
+    private Stream<String> writeMeter(Meter m) {
         Stream.Builder<Field> fields = Stream.builder();
 
         for (Measurement measurement : m.measure()) {
             String fieldKey = measurement.getStatistic().toString()
-                .replaceAll("(.)(\\p{Upper})", "$1_$2").toLowerCase();
+                    .replaceAll("(.)(\\p{Upper})", "$1_$2").toLowerCase();
             fields.add(new Field(fieldKey, measurement.getValue()));
         }
 
-        return influxLineProtocol(m.getId(), "unknown", fields.build(), clock.wallTime());
+        return Stream.of(influxLineProtocol(m.getId(), "unknown", fields.build(), clock.wallTime()));
     }
 
-    private String writeLongTaskTimer(LongTaskTimer timer) {
+    private Stream<String> writeLongTaskTimer(LongTaskTimer timer) {
         Stream<Field> fields = Stream.of(
-            new Field("active_tasks", timer.activeTasks()),
-            new Field("duration", timer.duration(getBaseTimeUnit()))
+                new Field("active_tasks", timer.activeTasks()),
+                new Field("duration", timer.duration(getBaseTimeUnit()))
+        );
+        return Stream.of(influxLineProtocol(timer.getId(), "long_task_timer", fields, clock.wallTime()));
+    }
+
+    private Stream<String> writeCounter(Meter.Id id, double count) {
+        return Stream.of(influxLineProtocol(id, "counter", Stream.of(new Field("value", count)), clock.wallTime()));
+    }
+
+    private Stream<String> writeGauge(Meter.Id id, Double value) {
+        return value.isNaN() ? Stream.empty() :
+            Stream.of(influxLineProtocol(id, "gauge", Stream.of(new Field("value", value)), clock.wallTime()));
+    }
+
+    private Stream<String> writeTimer(FunctionTimer timer) {
+        Stream<Field> fields = Stream.of(
+                new Field("sum", timer.totalTime(getBaseTimeUnit())),
+                new Field("count", timer.count()),
+                new Field("mean", timer.mean(getBaseTimeUnit()))
         );
 
-        return influxLineProtocol(timer.getId(), "long_task_timer", fields, clock.wallTime());
+        return Stream.of(influxLineProtocol(timer.getId(), "histogram", fields, clock.wallTime()));
     }
 
-    private String writeCounter(Meter.Id id, double count) {
-        return influxLineProtocol(id, "counter", Stream.of(new Field("value", count)), clock.wallTime());
-    }
-
-    private String writeGauge(Meter.Id id, double value) {
-        return influxLineProtocol(id, "gauge", Stream.of(new Field("value", value)), clock.wallTime());
-    }
-
-    private String writeTimer(FunctionTimer timer) {
-        Stream<Field> fields = Stream.of(
-            new Field("sum", timer.totalTime(getBaseTimeUnit())),
-            new Field("count", timer.count()),
-            new Field("mean", timer.mean(getBaseTimeUnit()))
-        );
-
-        return influxLineProtocol(timer.getId(), "histogram", fields, clock.wallTime());
-    }
-
-    private String writeTimer(Timer timer) {
-        final HistogramSnapshot snapshot = timer.takeSnapshot(false);
+    private Stream<String> writeTimer(Timer timer) {
         final Stream.Builder<Field> fields = Stream.builder();
 
-        fields.add(new Field("sum", snapshot.total(getBaseTimeUnit())));
-        fields.add(new Field("count", snapshot.count()));
-        fields.add(new Field("mean", snapshot.mean(getBaseTimeUnit())));
-        fields.add(new Field("upper", snapshot.max(getBaseTimeUnit())));
+        fields.add(new Field("sum", timer.totalTime(getBaseTimeUnit())));
+        fields.add(new Field("count", timer.count()));
+        fields.add(new Field("mean", timer.mean(getBaseTimeUnit())));
+        fields.add(new Field("upper", timer.max(getBaseTimeUnit())));
 
-        for (ValueAtPercentile v : snapshot.percentileValues()) {
-            fields.add(new Field(format.format(v.percentile()) + "_percentile", v.value(getBaseTimeUnit())));
-        }
-
-        return influxLineProtocol(timer.getId(), "histogram", fields.build(), clock.wallTime());
+        return Stream.of(influxLineProtocol(timer.getId(), "histogram", fields.build(), clock.wallTime()));
     }
 
-    private String writeSummary(DistributionSummary summary) {
-        final HistogramSnapshot snapshot = summary.takeSnapshot(false);
+    private Stream<String> writeSummary(DistributionSummary summary) {
         final Stream.Builder<Field> fields = Stream.builder();
 
-        fields.add(new Field("sum", snapshot.total()));
-        fields.add(new Field("count", snapshot.count()));
-        fields.add(new Field("mean", snapshot.mean()));
-        fields.add(new Field("upper", snapshot.max()));
+        fields.add(new Field("sum", summary.totalAmount()));
+        fields.add(new Field("count", summary.count()));
+        fields.add(new Field("mean", summary.mean()));
+        fields.add(new Field("upper", summary.max()));
 
-        for (ValueAtPercentile v : snapshot.percentileValues()) {
-            fields.add(new Field(format.format(v.percentile()) + "_percentile", v.value()));
-        }
-
-        return influxLineProtocol(summary.getId(), "histogram", fields.build(), clock.wallTime());
+        return Stream.of(influxLineProtocol(summary.getId(), "histogram", fields.build(), clock.wallTime()));
     }
 
     private String influxLineProtocol(Meter.Id id, String metricType, Stream<Field> fields, long time) {
         String tags = getConventionTags(id).stream()
-            .map(t -> "," + t.getKey() + "=" + t.getValue())
-            .collect(joining(""));
+                .map(t -> "," + t.getKey() + "=" + t.getValue())
+                .collect(joining(""));
 
         return getConventionName(id)
-            + tags + ",metric_type=" + metricType + " "
-            + fields.map(Field::toString).collect(joining(","))
-            + " " + time;
+                + tags + ",metric_type=" + metricType + " "
+                + fields.map(Field::toString).collect(joining(","))
+                + " " + time;
     }
 
     @Override
-    protected TimeUnit getBaseTimeUnit() {
+    protected final TimeUnit getBaseTimeUnit() {
         return TimeUnit.MILLISECONDS;
     }
+
 }

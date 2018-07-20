@@ -15,11 +15,9 @@
  */
 package io.micrometer.boot1.samples;
 
-import com.netflix.hystrix.contrib.javanica.aop.aspectj.HystrixCommandAspect;
 import io.micrometer.boot1.samples.components.PersonController;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication(scanBasePackageClasses = PersonController.class)
@@ -28,10 +26,4 @@ public class PrometheusSample {
     public static void main(String[] args) {
         new SpringApplicationBuilder(PrometheusSample.class).profiles("prometheus").run(args);
     }
-
-    @Bean
-    public HystrixCommandAspect hystrixAspect() {
-        return new HystrixCommandAspect();
-    }
-
 }

@@ -27,24 +27,44 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.List;
 
 import static java.util.Collections.emptyList;
 
 /**
- * File descriptor metrics.
+ * File descriptor metrics gathered by the JVM.
+ * <p>
+ * Supported JVM implementations:
+ * <ul>
+ *     <li>HotSpot</li>
+ *     <li>J9</li>
+ * </ul>
  *
  * @author Michael Weirauch
+ * @author Tommy Ludwig
  */
 @NonNullApi
 @NonNullFields
 public class FileDescriptorMetrics implements MeterBinder {
 
+    /** List of public, exported interface class names from supported JVM implementations. */
+    private static final List<String> UNIX_OPERATING_SYSTEM_BEAN_CLASS_NAMES = Arrays.asList(
+        "com.sun.management.UnixOperatingSystemMXBean", // HotSpot
+        "com.ibm.lang.management.UnixOperatingSystemMXBean" // J9
+    );
+
     private final OperatingSystemMXBean osBean;
     private final Iterable<Tag> tags;
+
     @Nullable
-    private final Method openFdsMethod;
+    private final Class<?> osBeanClass;
+
     @Nullable
-    private final Method maxFdsMethod;
+    private final Method openFilesMethod;
+
+    @Nullable
+    private final Method maxFilesMethod;
 
     public FileDescriptorMetrics() {
         this(emptyList());
@@ -59,21 +79,22 @@ public class FileDescriptorMetrics implements MeterBinder {
         this.osBean = osBean;
         this.tags = tags;
 
-        this.openFdsMethod = detectMethod("getOpenFileDescriptorCount");
-        this.maxFdsMethod = detectMethod("getMaxFileDescriptorCount");
+        this.osBeanClass = getFirstClassFound(UNIX_OPERATING_SYSTEM_BEAN_CLASS_NAMES);
+        this.openFilesMethod = detectMethod("getOpenFileDescriptorCount");
+        this.maxFilesMethod = detectMethod("getMaxFileDescriptorCount");
     }
 
     @Override
     public void bindTo(MeterRegistry registry) {
-        if (openFdsMethod != null) {
-            Gauge.builder("process.open.fds", osBean, x -> invoke(openFdsMethod))
+        if (openFilesMethod != null) {
+            Gauge.builder("process.files.open", osBean, x -> invoke(openFilesMethod))
                 .tags(tags)
                 .description("The open file descriptor count")
                 .register(registry);
         }
 
-        if (maxFdsMethod != null) {
-            Gauge.builder("process.max.fds", osBean, x -> invoke(maxFdsMethod))
+        if (maxFilesMethod != null) {
+            Gauge.builder("process.files.max", osBean, x -> invoke(maxFilesMethod))
                 .tags(tags)
                 .description("The maximum file descriptor count")
                 .register(registry);
@@ -90,12 +111,26 @@ public class FileDescriptorMetrics implements MeterBinder {
 
     @Nullable
     private Method detectMethod(String name) {
-        try {
-            final Method method = osBean.getClass().getDeclaredMethod(name);
-            method.setAccessible(true);
-            return method;
-        } catch (NoSuchMethodException | SecurityException e) {
+        if (osBeanClass == null) {
             return null;
         }
+        try {
+            // ensure the Bean we have is actually an instance of the interface
+            osBeanClass.cast(osBean);
+            return osBeanClass.getDeclaredMethod(name);
+        } catch (ClassCastException | NoSuchMethodException | SecurityException e) {
+            return null;
+        }
+    }
+
+    @Nullable
+    private Class<?> getFirstClassFound(List<String> classNames) {
+        for (String className : classNames) {
+            try {
+                return Class.forName(className);
+            } catch (ClassNotFoundException ignore) {
+            }
+        }
+        return null;
     }
 }

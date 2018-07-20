@@ -28,23 +28,18 @@ import java.util.function.ToDoubleFunction;
  * @author Jon Schneider
  */
 public interface FunctionCounter extends Meter {
-    static <T> Builder<T> builder(String name, T obj, ToDoubleFunction<T> f) {
+    static <T> Builder<T> builder(String name, @Nullable T obj, ToDoubleFunction<T> f) {
         return new Builder<>(name, obj, f);
     }
 
     /**
-     * The cumulative count since this counter was created.
+     * @return The cumulative count since this counter was created.
      */
     double count();
 
     @Override
     default Iterable<Measurement> measure() {
         return Collections.singletonList(new Measurement(this::count, Statistic.COUNT));
-    }
-
-    @Override
-    default Meter.Type type() {
-        return Meter.Type.COUNTER;
     }
 
     /**
@@ -54,15 +49,19 @@ public interface FunctionCounter extends Meter {
      */
     class Builder<T> {
         private final String name;
-        private final T obj;
         private final ToDoubleFunction<T> f;
         private final List<Tag> tags = new ArrayList<>();
+
+        @Nullable
+        private final T obj;
+
         @Nullable
         private String description;
+
         @Nullable
         private String baseUnit;
 
-        private Builder(String name, T obj, ToDoubleFunction<T> f) {
+        private Builder(String name, @Nullable T obj, ToDoubleFunction<T> f) {
             this.name = name;
             this.obj = obj;
             this.f = f;
@@ -70,6 +69,7 @@ public interface FunctionCounter extends Meter {
 
         /**
          * @param tags Must be an even number of arguments representing key/value pairs of tags.
+         * @return The function counter builder with added tags.
          */
         public Builder<T> tags(String... tags) {
             return tags(Tags.of(tags));

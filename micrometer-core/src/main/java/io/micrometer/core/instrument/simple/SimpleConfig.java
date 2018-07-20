@@ -15,11 +15,16 @@
  */
 package io.micrometer.core.instrument.simple;
 
-import io.micrometer.core.instrument.step.StepRegistryConfig;
+import io.micrometer.core.instrument.config.MeterRegistryConfig;
 
 import java.time.Duration;
 
-public interface SimpleConfig extends StepRegistryConfig {
+/**
+ * Configuration for {@link SimpleMeterRegistry}.
+ *
+ * @author Jon Schneider
+ */
+public interface SimpleConfig extends MeterRegistryConfig {
     SimpleConfig DEFAULT = k -> null;
 
     @Override
@@ -28,13 +33,17 @@ public interface SimpleConfig extends StepRegistryConfig {
     }
 
     /**
-     * Returns the step size (reporting frequency) to use. The default is 10 seconds.
+     * @return The step size (reporting frequency) to use.
      */
     default Duration step() {
         String v = get(prefix() + ".step");
         return v == null ? Duration.ofMinutes(1) : Duration.parse(v);
     }
 
+    /**
+     * @return A mode that determines whether the registry reports cumulative values over all time or
+     * a rate normalized form representing changes in the last {@link #step()}.
+     */
     default CountingMode mode() {
         String v = get(prefix() + ".mode");
         if (v == null)

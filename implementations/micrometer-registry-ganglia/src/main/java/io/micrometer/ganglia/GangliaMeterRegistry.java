@@ -50,7 +50,7 @@ public class GangliaMeterRegistry extends DropwizardMeterRegistry {
                     .convertDurationsTo(config.durationUnits())
                     .build(ganglia);
 
-            if(config.enabled())
+            if (config.enabled())
                 start();
         } catch (IOException e) {
             throw new RuntimeException("Failed to configure Ganglia metrics reporting", e);
@@ -63,5 +63,17 @@ public class GangliaMeterRegistry extends DropwizardMeterRegistry {
 
     public void start() {
         this.reporter.start(config.step().getSeconds(), TimeUnit.SECONDS);
+    }
+
+    @Override
+    public void close() {
+        reporter.report();
+        stop();
+        super.close();
+    }
+
+    @Override
+    protected Double nullGaugeValue() {
+        return Double.NaN;
     }
 }

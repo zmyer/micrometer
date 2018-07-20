@@ -16,10 +16,12 @@
 package io.micrometer.spring.autoconfigure;
 
 import io.micrometer.core.instrument.binder.MeterBinder;
+import io.micrometer.core.instrument.binder.jvm.ClassLoaderMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics;
 import io.micrometer.core.instrument.binder.logging.LogbackMetrics;
+import io.micrometer.core.instrument.binder.system.FileDescriptorMetrics;
 import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 import io.micrometer.core.instrument.binder.system.UptimeMetrics;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -58,6 +60,13 @@ class MeterBindersConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(value = "management.metrics.binders.jvm.enabled", matchIfMissing = true)
+    @ConditionalOnMissingBean
+    public ClassLoaderMetrics classLoaderMetrics() {
+        return new ClassLoaderMetrics();
+    }
+
+    @Bean
     @ConditionalOnMissingBean(LogbackMetrics.class)
     @ConditionalOnProperty(value = "management.metrics.binders.logback.enabled", matchIfMissing = true)
     @ConditionalOnClass(name = "ch.qos.logback.classic.Logger")
@@ -77,6 +86,13 @@ class MeterBindersConfiguration {
     @ConditionalOnMissingBean
     public ProcessorMetrics processorMetrics() {
         return new ProcessorMetrics();
+    }
+
+    @Bean
+    @ConditionalOnProperty(value = "management.metrics.binders.files.enabled", matchIfMissing = true)
+    @ConditionalOnMissingBean
+    public FileDescriptorMetrics fileDescriptorMetrics() {
+        return new FileDescriptorMetrics();
     }
 
 }

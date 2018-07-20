@@ -63,7 +63,13 @@ public class StatsdProperties {
     /**
      * Maximum size of the queue of items waiting to be sent to the StatsD server.
      */
+    @Deprecated
     private Integer queueSize = Integer.MAX_VALUE;
+
+    /**
+     * Enables or disables sending of unchanged meters to StatsD server
+     */
+    private Boolean publishUnchangedMeters = true;
 
     public Boolean getEnabled() {
         return this.enabled;
@@ -113,12 +119,22 @@ public class StatsdProperties {
         this.pollingFrequency = pollingFrequency;
     }
 
+    @Deprecated
     public Integer getQueueSize() {
         return this.queueSize;
     }
 
+    @Deprecated
     public void setQueueSize(Integer queueSize) {
         this.queueSize = queueSize;
+    }
+
+    public Boolean getPublishUnchangedMeters() {
+        return publishUnchangedMeters;
+    }
+
+    public void setPublishUnchangedMeters(Boolean publishUnchangedMeters) {
+        this.publishUnchangedMeters = publishUnchangedMeters;
     }
 
 }

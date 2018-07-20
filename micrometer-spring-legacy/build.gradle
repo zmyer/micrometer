@@ -1,6 +1,5 @@
 plugins {
     id "io.spring.dependency-management" version "1.0.3.RELEASE"
-    id "net.ltgt.apt-eclipse" version "0.13"
 }
 
 apply plugin: 'nebula.optional-base'
@@ -8,11 +7,11 @@ apply plugin: 'nebula.facet'
 
 dependencyManagement {
     imports {
-        mavenBom 'org.springframework.boot:spring-boot-dependencies:1.5.4.RELEASE'
+        mavenBom 'org.springframework.boot:spring-boot-dependencies:1.5.10.RELEASE'
     }
     dependencies {
         dependency 'org.assertj:assertj-core:3.8.0'
-        dependency 'io.projectreactor:reactor-core:3.1.2.RELEASE'
+        dependency 'io.projectreactor:reactor-core:3.1.4.RELEASE'
     }
 }
 
@@ -33,8 +32,9 @@ dependencies {
     compile 'org.springframework:spring-web', optional
     compile 'javax.servlet:javax.servlet-api:3.1.0', optional
     compile 'org.aspectj:aspectjweaver:1.8.+', optional
+    compile 'io.prometheus:simpleclient_pushgateway:latest.release', optional
 
-    ['atlas', 'prometheus', 'datadog', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx'].each { sys ->
+    ['atlas', 'prometheus', 'datadog', 'elastic', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx', 'wavefront', 'dynatrace'].each { sys ->
         compile project(":micrometer-registry-$sys"), optional
     }
 
@@ -43,12 +43,14 @@ dependencies {
     compile 'org.springframework.integration:spring-integration-core', optional
 
     // to validate auto-completion on configuration properties
-    compileOnly 'org.springframework.boot:spring-boot-configuration-processor'
-    apt 'org.springframework.boot:spring-boot-configuration-processor'
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    testCompile project(':micrometer-test')
 
     testCompile 'org.springframework.boot:spring-boot-starter-web'
     testCompile 'org.springframework.boot:spring-boot-actuator'
     testCompile 'org.springframework.boot:spring-boot-starter-test'
+    testCompile 'org.springframework.boot:spring-boot-starter-jersey'
 
     // for testing DataSource metrics
     testCompile 'org.hsqldb:hsqldb'
@@ -56,16 +58,21 @@ dependencies {
     testCompile 'com.zaxxer:HikariCP'
 
     // for use in mock servers
-    testCompile 'org.apache.tomcat.embed:tomcat-embed-core:8.5.15'
+    testCompile 'org.apache.tomcat.embed:tomcat-embed-core'
 
     // for classpath exclusion in tests
     testCompile 'org.springframework.cloud:spring-cloud-test-support:2.+'
 
-    testRuntime 'org.apache.httpcomponents:httpclient:4.4+'
+    testRuntime 'org.apache.httpcomponents:httpclient:4.5.+'
 
     testCompile 'org.springframework.integration:spring-integration-java-dsl'
     testCompile 'org.springframework.integration:spring-integration-ws'
     testCompile 'org.springframework.integration:spring-integration-xml'
 
     testCompile 'org.springframework.security:spring-security-test'
+
+    // required for jdk 9 testing
+    testRuntime 'javax.xml.bind:jaxb-api:2.3.0'
+    testRuntime 'javax.activation:activation:1.1.1'
+    testRuntime 'com.sun.xml.messaging.saaj:saaj-impl:1.4.0'
 }

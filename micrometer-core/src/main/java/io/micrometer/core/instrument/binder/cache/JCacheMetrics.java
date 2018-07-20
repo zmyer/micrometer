@@ -19,52 +19,44 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.binder.MeterBinder;
+import io.micrometer.core.instrument.config.InvalidConfigurationException;
 import io.micrometer.core.lang.NonNullApi;
 import io.micrometer.core.lang.NonNullFields;
+import io.micrometer.core.lang.Nullable;
 
 import javax.cache.Cache;
+import javax.cache.CacheManager;
 import javax.management.*;
 import java.util.List;
 
 /**
+ * Collect metrics on JSR-107 JCache caches, including detailed metrics on manual puts and removals.
  * See https://github.com/jsr107/demo/blob/master/src/test/java/javax/cache/core/StatisticsExample.java
+ * <p>
+ * Note that JSR-107 does not provide any insight into the size or estimated size of the cache, so
+ * the size metric of a JCache cache will always report 0.
  *
  * @author Jon Schneider
  */
 @NonNullApi
 @NonNullFields
-public class JCacheMetrics implements MeterBinder {
-    private final String name;
-    private final Iterable<Tag> tags;
+public class JCacheMetrics extends CacheMeterBinder {
+    @Nullable
     private ObjectName objectName;
-    public JCacheMetrics(Cache<?, ?> cache, String name, Iterable<Tag> tags) {
-        try {
-            String cacheManagerUri = cache.getCacheManager().getURI().toString()
-                .replace(':', '.'); // ehcache's uri is prefixed with 'urn:'
-
-            this.objectName = new ObjectName("javax.cache:type=CacheStatistics"
-                + ",CacheManager=" + cacheManagerUri
-                + ",Cache=" + cache.getName());
-        } catch (MalformedObjectNameException ignored) {
-            throw new IllegalStateException("Cache name '" + cache.getName() + "' results in an invalid JMX name");
-        }
-        this.name = name;
-        this.tags = Tags.concat(tags, "name", cache.getName());
-    }
 
     /**
      * Record metrics on a JCache cache.
      *
      * @param registry The registry to bind metrics to.
      * @param cache    The cache to instrument.
-     * @param name     The name prefix of the metrics.
      * @param tags     Tags to apply to all recorded metrics. Must be an even number of arguments representing key/value pairs of tags.
+     * @param <C>      The cache type.
+     * @param <K>      The cache key type.
+     * @param <V>      The cache value type.
      * @return The instrumented cache, unchanged. The original cache is not wrapped or proxied in any way.
-     * @see com.google.common.cache.CacheStats
      */
-    public static <K, V, C extends Cache<K, V>> C monitor(MeterRegistry registry, C cache, String name, String... tags) {
-        return monitor(registry, cache, name, Tags.of(tags));
+    public static <K, V, C extends Cache<K, V>> C monitor(MeterRegistry registry, C cache, String... tags) {
+        return monitor(registry, cache, Tags.of(tags));
     }
 
     /**
@@ -72,71 +64,85 @@ public class JCacheMetrics implements MeterBinder {
      *
      * @param registry The registry to bind metrics to.
      * @param cache    The cache to instrument.
-     * @param name     The name prefix of the metrics.
      * @param tags     Tags to apply to all recorded metrics.
+     * @param <C>      The cache type.
+     * @param <K>      The cache key type.
+     * @param <V>      The cache value type.
      * @return The instrumented cache, unchanged. The original cache is not wrapped or proxied in any way.
-     * @see com.google.common.cache.CacheStats
      */
-    public static <K, V, C extends Cache<K, V>> C monitor(MeterRegistry registry, C cache, String name, Iterable<Tag> tags) {
-        new JCacheMetrics(cache, name, tags).bindTo(registry);
+    public static <K, V, C extends Cache<K, V>> C monitor(MeterRegistry registry, C cache, Iterable<Tag> tags) {
+        new JCacheMetrics(cache, tags).bindTo(registry);
         return cache;
     }
 
-    @Override
-    public void bindTo(MeterRegistry registry) {
-        Gauge.builder(name + ".requests", objectName, CacheStatistics.CacheHits::get)
-            .tags(tags).tags("result", "hit")
-            .description("The number of times cache lookup methods have returned a cached value")
-            .register(registry);
+    public JCacheMetrics(Cache<?, ?> cache, Iterable<Tag> tags) {
+        super(cache, cache.getName(), tags);
+        try {
+            CacheManager cacheManager = cache.getCacheManager();
+            if (cacheManager != null) {
+                String cacheManagerUri = cacheManager.getURI().toString()
+                        .replace(':', '.'); // ehcache's uri is prefixed with 'urn:'
 
-        Gauge.builder(name + ".requests", objectName, CacheStatistics.CacheMisses::get)
-            .tags(tags).tags("result", "miss")
-            .description("The number of times cache lookup methods have not returned a value")
-            .register(registry);
-
-        Gauge.builder(name + ".puts", objectName, CacheStatistics.CachePuts::get)
-            .tags(tags)
-            .description("Cache puts")
-            .register(registry);
-
-        Gauge.builder(name + ".removals", objectName, CacheStatistics.CacheRemovals::get)
-            .tags(tags)
-            .description("Cache removals")
-            .register(registry);
-
-        Gauge.builder(name + ".evictions", objectName, CacheStatistics.CacheEvictions::get)
-            .tags(tags)
-            .description("Cache evictions")
-            .register(registry);
+                this.objectName = new ObjectName("javax.cache:type=CacheStatistics"
+                        + ",CacheManager=" + cacheManagerUri
+                        + ",Cache=" + cache.getName());
+            }
+        } catch (MalformedObjectNameException ignored) {
+            throw new InvalidConfigurationException("Cache name '" + cache.getName() + "' results in an invalid JMX name");
+        }
     }
 
-    /**
-     * Defining cache statistics parameters as constants.
-     */
-    private enum CacheStatistics {
-        // these constants are capitalized to match the object names found in JMX
-        CacheHits, CacheHitPercentage,
-        CacheMisses, CacheMissPercentage,
-        CacheGets, CachePuts, CacheRemovals, CacheEvictions,
-        AverageGetTime, AveragePutTime, AverageRemoveTime;
+    @Override
+    protected Long size() {
+        // JCache statistics don't support size
+        return null;
+    }
 
-        public long get(ObjectName objectName) {
-            try {
-                List<MBeanServer> mBeanServers = MBeanServerFactory.findMBeanServer(null);
-                for (MBeanServer mBeanServer : mBeanServers) {
-                    try {
-                        Object attribute = mBeanServer.getAttribute(objectName, this.toString());
-                        return (Long) attribute;
-                    } catch (AttributeNotFoundException | InstanceNotFoundException ex) {
-                        // did not find MBean, try the next server
-                    }
-                }
-            } catch (MBeanException | ReflectionException ex) {
-                throw new IllegalStateException(ex);
-            }
+    @Override
+    protected long hitCount() {
+        return lookupStatistic("CacheHits");
+    }
 
-            // didn't find the MBean in any servers
-            return 0;
+    @Override
+    protected Long missCount() {
+        return lookupStatistic("CacheMisses");
+    }
+
+    @Override
+    protected Long evictionCount() {
+        return lookupStatistic("CacheEvictions");
+    }
+
+    @Override
+    protected long putCount() {
+        return lookupStatistic("CachePuts");
+    }
+
+    @Override
+    protected void bindImplementationSpecificMetrics(MeterRegistry registry) {
+        if (objectName != null) {
+            Gauge.builder("cache.removals", objectName, objectName -> lookupStatistic("CacheRemovals"))
+                    .tags(getTagsWithCacheName())
+                    .description("Cache removals")
+                    .register(registry);
         }
+    }
+
+    private Long lookupStatistic(String name) {
+        try {
+            List<MBeanServer> mBeanServers = MBeanServerFactory.findMBeanServer(null);
+            for (MBeanServer mBeanServer : mBeanServers) {
+                try {
+                    return (Long) mBeanServer.getAttribute(objectName, name);
+                } catch (AttributeNotFoundException | InstanceNotFoundException ex) {
+                    // did not find MBean, try the next server
+                }
+            }
+        } catch (MBeanException | ReflectionException ex) {
+            throw new IllegalStateException(ex);
+        }
+
+        // didn't find the MBean in any servers
+        return 0L;
     }
 }

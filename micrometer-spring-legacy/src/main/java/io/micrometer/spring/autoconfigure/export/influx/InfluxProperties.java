@@ -64,6 +64,26 @@ public class InfluxProperties extends StepRegistryProperties {
      */
     private Boolean compressed;
 
+    /**
+     * Check if Influx database exists before attempting to publish metrics to it, creating it if it does not exist.
+     */
+    private Boolean autoCreateDb;
+
+    /**
+     * Time period for which influx should retain data in the current database (e.g. 2h, 52w)
+     */
+    private String retentionDuration;
+
+    /**
+     * How many copies of the data are stored in the cluster. Must be 1 for a single node instance.
+     */
+    private Integer retentionReplicationFactor;
+
+    /**
+     * The time range covered by a shard group (e.g. 2h, 52w).
+     */
+    private String retentionShardDuration;
+
     public String getDb() {
         return this.db;
     }
@@ -120,4 +140,35 @@ public class InfluxProperties extends StepRegistryProperties {
         this.compressed = compressed;
     }
 
+    public Boolean getAutoCreateDb() {
+        return autoCreateDb;
+    }
+
+    public void setAutoCreateDb(Boolean autoCreateDb) {
+        this.autoCreateDb = autoCreateDb;
+    }
+
+    public String getRetentionDuration() {
+        return retentionDuration;
+    }
+
+    public void setRetentionDuration(String retentionDuration) {
+        this.retentionDuration = retentionDuration;
+    }
+
+    public Integer getRetentionReplicationFactor() {
+        return retentionReplicationFactor;
+    }
+
+    public void setRetentionReplicationFactor(Integer retentionReplicationFactor) {
+        this.retentionReplicationFactor = retentionReplicationFactor;
+    }
+
+    public String getRetentionShardDuration() {
+        return retentionShardDuration;
+    }
+
+    public void setRetentionShardDuration(String retentionShardDuration) {
+        this.retentionShardDuration = retentionShardDuration;
+    }
 }

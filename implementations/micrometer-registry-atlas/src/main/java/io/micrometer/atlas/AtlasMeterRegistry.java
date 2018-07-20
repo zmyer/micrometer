@@ -23,16 +23,18 @@ import com.netflix.spectator.api.histogram.PercentileTimer;
 import com.netflix.spectator.atlas.AtlasConfig;
 import com.netflix.spectator.atlas.AtlasRegistry;
 import io.micrometer.core.instrument.*;
-import io.micrometer.core.instrument.config.NamingConvention;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.HistogramGauges;
+import io.micrometer.core.instrument.distribution.ValueAtPercentile;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.internal.DefaultMeter;
 import io.micrometer.core.instrument.step.StepFunctionCounter;
 import io.micrometer.core.instrument.step.StepFunctionTimer;
+import io.micrometer.core.instrument.util.DoubleFormat;
 import io.micrometer.core.lang.Nullable;
 
-import java.text.DecimalFormat;
-import java.time.Duration;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.ToDoubleFunction;
@@ -46,7 +48,6 @@ import static java.util.stream.StreamSupport.stream;
  */
 public class AtlasMeterRegistry extends MeterRegistry {
     private final AtlasRegistry registry;
-    private final DecimalFormat percentileFormat = new DecimalFormat("#.####");
     private final AtlasConfig atlasConfig;
 
     public AtlasMeterRegistry(AtlasConfig config, Clock clock) {
@@ -68,7 +69,7 @@ public class AtlasMeterRegistry extends MeterRegistry {
 
         // invalid character replacement happens in the spectator-reg-atlas module, so doesn't need
         // to be duplicated here.
-        this.config().namingConvention(NamingConvention.camelCase);
+        this.config().namingConvention(new AtlasNamingConvention());
 
         start();
     }
@@ -78,15 +79,26 @@ public class AtlasMeterRegistry extends MeterRegistry {
     }
 
     public void start() {
-        getAtlasRegistry().start();
+        registry.start();
     }
 
     public void stop() {
-        getAtlasRegistry().stop();
+        registry.stop();
     }
 
-    private AtlasRegistry getAtlasRegistry() {
-        return (AtlasRegistry) this.getSpectatorRegistry();
+    @Override
+    public void close() {
+        try {
+            @SuppressWarnings("JavaReflectionMemberAccess")
+            Method collectData = registry.getClass().getDeclaredMethod("collectData");
+            collectData.setAccessible(true);
+            collectData.invoke(registry);
+        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+            // oh well, we tried
+        }
+
+        stop();
+        super.close();
     }
 
     @Override
@@ -96,56 +108,53 @@ public class AtlasMeterRegistry extends MeterRegistry {
 
     @SuppressWarnings("ConstantConditions")
     @Override
-    protected io.micrometer.core.instrument.DistributionSummary newDistributionSummary(Meter.Id id, HistogramConfig histogramConfig) {
+    protected io.micrometer.core.instrument.DistributionSummary newDistributionSummary(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig,
+                                                                                       double scale) {
         com.netflix.spectator.api.DistributionSummary internalSummary = registry.distributionSummary(spectatorId(id));
 
-        if (histogramConfig.isPercentileHistogram()) {
+        if (distributionStatisticConfig.isPercentileHistogram()) {
             // This doesn't report the normal count/totalTime/max stats, so we treat it as additive
             PercentileDistributionSummary.get(registry, spectatorId(id));
         }
 
-        SpectatorDistributionSummary summary = new SpectatorDistributionSummary(id, internalSummary, clock, histogramConfig);
+        SpectatorDistributionSummary summary = new SpectatorDistributionSummary(id, internalSummary, clock, distributionStatisticConfig, scale);
 
-        for (long sla : histogramConfig.getSlaBoundaries()) {
-            gauge(id.getName(), Tags.concat(getConventionTags(id), "sla", Long.toString(sla)), sla, summary::histogramCountAtValue);
-        }
-
-        for (double percentile : histogramConfig.getPercentiles()) {
-            gauge(id.getName(), Tags.concat(getConventionTags(id), "percentile", percentileFormat.format(percentile)),
-                summary, s -> s.percentile(percentile));
-        }
+        HistogramGauges.register(summary, this,
+                percentile -> id.getName(),
+                percentile -> Tags.concat(id.getTags(), "percentile", DoubleFormat.decimalOrNan(percentile.percentile())),
+                ValueAtPercentile::value,
+                bucket -> id.getName(),
+                bucket -> Tags.concat(id.getTags(), "sla", DoubleFormat.decimalOrWhole(bucket.bucket())));
 
         return summary;
     }
 
     @SuppressWarnings("ConstantConditions")
     @Override
-    protected Timer newTimer(Meter.Id id, HistogramConfig histogramConfig, PauseDetector pauseDetector) {
+    protected Timer newTimer(Meter.Id id, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector) {
         com.netflix.spectator.api.Timer internalTimer = registry.timer(spectatorId(id));
 
-        if (histogramConfig.isPercentileHistogram()) {
+        if (distributionStatisticConfig.isPercentileHistogram()) {
             // This doesn't report the normal count/totalTime/max stats, so we treat it as additive
             PercentileTimer.get(registry, spectatorId(id));
         }
 
-        SpectatorTimer timer = new SpectatorTimer(id, internalTimer, clock, histogramConfig, pauseDetector, getBaseTimeUnit());
+        SpectatorTimer timer = new SpectatorTimer(id, internalTimer, clock, distributionStatisticConfig, pauseDetector, getBaseTimeUnit());
 
-        for (long sla : histogramConfig.getSlaBoundaries()) {
-            gauge(id.getName(), Tags.concat(getConventionTags(id), "sla", Duration.ofNanos(sla).toString()), sla, timer::histogramCountAtValue);
-        }
-
-        for (double percentile : histogramConfig.getPercentiles()) {
-            gauge(id.getName(), Tags.concat(getConventionTags(id), "percentile", percentileFormat.format(percentile)),
-                timer, t -> t.percentile(percentile, TimeUnit.SECONDS));
-        }
+        HistogramGauges.register(timer, this,
+                percentile -> id.getName(),
+                percentile -> Tags.concat(id.getTags(), "percentile", DoubleFormat.decimalOrNan(percentile.percentile())),
+                percentile -> percentile.value(timer.baseTimeUnit()),
+                bucket -> id.getName(),
+                bucket -> Tags.concat(id.getTags(), "sla", DoubleFormat.decimalOrWhole(bucket.bucket(timer.baseTimeUnit()))));
 
         return timer;
     }
 
     private Id spectatorId(Meter.Id id) {
         List<com.netflix.spectator.api.Tag> tags = getConventionTags(id).stream()
-            .map(t -> new BasicTag(t.getKey(), t.getValue()))
-            .collect(toList());
+                .map(t -> new BasicTag(t.getKey(), t.getValue()))
+                .collect(toList());
         return registry.createId(getConventionName(id), tags);
     }
 
@@ -157,15 +166,15 @@ public class AtlasMeterRegistry extends MeterRegistry {
     }
 
     @Override
-    protected <T> FunctionCounter newFunctionCounter(Meter.Id id, T obj, ToDoubleFunction<T> valueFunction) {
-        FunctionCounter fc = new StepFunctionCounter<>(id, clock, atlasConfig.step().toMillis(), obj, valueFunction);
+    protected <T> FunctionCounter newFunctionCounter(Meter.Id id, T obj, ToDoubleFunction<T> countFunction) {
+        FunctionCounter fc = new StepFunctionCounter<>(id, clock, atlasConfig.step().toMillis(), obj, countFunction);
         newMeter(id, Meter.Type.COUNTER, fc.measure());
         return fc;
     }
 
     @Override
-    protected <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnits) {
-        FunctionTimer ft = new StepFunctionTimer<>(id, clock, atlasConfig.step().toMillis(), obj, countFunction, totalTimeFunction, totalTimeFunctionUnits, getBaseTimeUnit());
+    protected <T> FunctionTimer newFunctionTimer(Meter.Id id, T obj, ToLongFunction<T> countFunction, ToDoubleFunction<T> totalTimeFunction, TimeUnit totalTimeFunctionUnit) {
+        FunctionTimer ft = new StepFunctionTimer<>(id, clock, atlasConfig.step().toMillis(), obj, countFunction, totalTimeFunction, totalTimeFunctionUnit, getBaseTimeUnit());
         newMeter(id, Meter.Type.TIMER, ft.measure());
         return ft;
     }
@@ -182,12 +191,12 @@ public class AtlasMeterRegistry extends MeterRegistry {
             @Override
             public Iterable<com.netflix.spectator.api.Measurement> measure() {
                 return stream(measurements.spliterator(), false)
-                    .map(m -> {
-                        com.netflix.spectator.api.Statistic stat = AtlasUtils.toSpectatorStatistic(m.getStatistic());
-                        Id idWithStat = stat == null ? id : id.withTag("statistic", stat.toString());
-                        return new com.netflix.spectator.api.Measurement(idWithStat, clock.wallTime(), m.getValue());
-                    })
-                    .collect(toList());
+                        .map(m -> {
+                            com.netflix.spectator.api.Statistic stat = AtlasUtils.toSpectatorStatistic(m.getStatistic());
+                            Id idWithStat = stat == null ? id : id.withTag("statistic", stat.toString());
+                            return new com.netflix.spectator.api.Measurement(idWithStat, clock.wallTime(), m.getValue());
+                        })
+                        .collect(toList());
             }
         };
         registry.register(spectatorMeter);
@@ -207,10 +216,10 @@ public class AtlasMeterRegistry extends MeterRegistry {
     }
 
     @Override
-    protected HistogramConfig defaultHistogramConfig() {
-        return HistogramConfig.builder()
-            .histogramExpiry(atlasConfig.step())
-            .build()
-            .merge(HistogramConfig.DEFAULT);
+    protected DistributionStatisticConfig defaultHistogramConfig() {
+        return DistributionStatisticConfig.builder()
+                .expiry(atlasConfig.step())
+                .build()
+                .merge(DistributionStatisticConfig.DEFAULT);
     }
 }

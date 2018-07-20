@@ -24,34 +24,48 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.ToDoubleFunction;
 import java.util.function.ToLongFunction;
 
+/**
+ * A timer that tracks two monotonically increasing functions: one representing the count of events and one
+ * representing the total time spent in every event.
+ *
+ * @author Jon Schneider
+ */
 public interface FunctionTimer extends Meter {
     static <T> Builder<T> builder(String name, T obj, ToLongFunction<T> countFunction,
                                   ToDoubleFunction<T> totalTimeFunction,
-                                  TimeUnit totalTimeFunctionUnits) {
-        return new Builder<>(name, obj, countFunction, totalTimeFunction, totalTimeFunctionUnits);
+                                  TimeUnit totalTimeFunctionUnit) {
+        return new Builder<>(name, obj, countFunction, totalTimeFunction, totalTimeFunctionUnit);
     }
 
     /**
-     * The total number of occurrences of the timed event.
+     * @return The total number of occurrences of the timed event.
      */
     double count();
 
     /**
-     * The total time of all occurrences of the timed event.
+     * @param unit The base unit of time to scale the total to.
+     * @return The total time of all occurrences of the timed event.
      */
     double totalTime(TimeUnit unit);
 
+    /**
+     * @param unit The base unit of time to scale the mean to.
+     * @return The distribution average for all recorded events.
+     */
     default double mean(TimeUnit unit) {
         return count() == 0 ? 0 : totalTime(unit) / count();
     }
 
+    /**
+     * @return The base time unit of the timer to which all published metrics will be scaled
+     */
     TimeUnit baseTimeUnit();
 
     @Override
     default Iterable<Measurement> measure() {
         return Arrays.asList(
-            new Measurement(this::count, Statistic.COUNT),
-            new Measurement(() -> totalTime(baseTimeUnit()), Statistic.TOTAL_TIME)
+                new Measurement(this::count, Statistic.COUNT),
+                new Measurement(() -> totalTime(baseTimeUnit()), Statistic.TOTAL_TIME)
         );
     }
 
@@ -62,28 +76,31 @@ public interface FunctionTimer extends Meter {
      */
     class Builder<T> {
         private final String name;
-        private final T obj;
         private final ToLongFunction<T> countFunction;
         private final ToDoubleFunction<T> totalTimeFunction;
-        private final TimeUnit totalTimeFunctionUnits;
+        private final TimeUnit totalTimeFunctionUnit;
         private final List<Tag> tags = new ArrayList<>();
+
+        @Nullable
+        private final T obj;
 
         @Nullable
         private String description;
 
-        private Builder(String name, T obj,
+        private Builder(String name, @Nullable T obj,
                         ToLongFunction<T> countFunction,
                         ToDoubleFunction<T> totalTimeFunction,
-                        TimeUnit totalTimeFunctionUnits) {
+                        TimeUnit totalTimeFunctionUnit) {
             this.name = name;
             this.obj = obj;
             this.countFunction = countFunction;
             this.totalTimeFunction = totalTimeFunction;
-            this.totalTimeFunctionUnits = totalTimeFunctionUnits;
+            this.totalTimeFunctionUnit = totalTimeFunctionUnit;
         }
 
         /**
          * @param tags Must be an even number of arguments representing key/value pairs of tags.
+         * @return The function timer builder with added tags.
          */
         public Builder<T> tags(String... tags) {
             return tags(Tags.of(tags));
@@ -127,7 +144,7 @@ public interface FunctionTimer extends Meter {
          */
         public FunctionTimer register(MeterRegistry registry) {
             return registry.more().timer(new Meter.Id(name, tags, null, description, Type.TIMER), obj, countFunction, totalTimeFunction,
-                totalTimeFunctionUnits);
+                    totalTimeFunctionUnit);
         }
     }
 }

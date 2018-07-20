@@ -19,7 +19,7 @@ import com.netflix.spectator.api.Measurement;
 import com.netflix.spectator.api.Statistic;
 import io.micrometer.core.instrument.AbstractDistributionSummary;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import io.micrometer.core.instrument.util.MeterEquivalence;
 import io.micrometer.core.lang.Nullable;
 
@@ -31,8 +31,9 @@ public class SpectatorDistributionSummary extends AbstractDistributionSummary {
     SpectatorDistributionSummary(Id id,
                                  com.netflix.spectator.api.DistributionSummary distributionSummary,
                                  Clock clock,
-                                 HistogramConfig histogramConfig) {
-        super(id, clock, histogramConfig);
+                                 DistributionStatisticConfig distributionStatisticConfig,
+                                 double scale) {
+        super(id, clock, distributionStatisticConfig, scale, false);
         this.summary = distributionSummary;
     }
 
@@ -59,8 +60,8 @@ public class SpectatorDistributionSummary extends AbstractDistributionSummary {
     @Override
     public double max() {
         for (Measurement measurement : summary.measure()) {
-            if(stream(measurement.id().tags().spliterator(), false)
-                .anyMatch(tag -> tag.key().equals("statistic") && tag.value().equals(Statistic.max.toString()))) {
+            if (stream(measurement.id().tags().spliterator(), false)
+                    .anyMatch(tag -> tag.key().equals("statistic") && tag.value().equals(Statistic.max.toString()))) {
                 return measurement.value();
             }
         }

@@ -17,11 +17,8 @@ package io.micrometer.prometheus;
 
 import io.micrometer.core.instrument.AbstractDistributionSummary;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.CountAtValue;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.TimeWindowHistogram;
+import io.micrometer.core.instrument.distribution.*;
 import io.micrometer.core.instrument.util.MeterEquivalence;
-import io.micrometer.core.instrument.util.TimeDecayingMax;
 import io.micrometer.core.lang.Nullable;
 
 import java.time.Duration;
@@ -29,20 +26,35 @@ import java.util.concurrent.atomic.DoubleAdder;
 import java.util.concurrent.atomic.LongAdder;
 
 public class PrometheusDistributionSummary extends AbstractDistributionSummary {
+    private static final CountAtBucket[] EMPTY_HISTOGRAM = new CountAtBucket[0];
+
     private LongAdder count = new LongAdder();
     private DoubleAdder amount = new DoubleAdder();
-    private TimeDecayingMax max;
-    private final TimeWindowHistogram percentilesHistogram;
+    private TimeWindowMax max;
 
-    PrometheusDistributionSummary(Id id, Clock clock, HistogramConfig histogramConfig) {
-        super(id, clock, histogramConfig);
-        this.max = new TimeDecayingMax(clock, histogramConfig);
-        this.percentilesHistogram = new TimeWindowHistogram(clock,
-            HistogramConfig.builder()
-                .histogramExpiry(Duration.ofDays(1825)) // effectively never roll over
-                .histogramBufferLength(1)
-                .build()
-                .merge(histogramConfig));
+    @Nullable
+    private final Histogram histogram;
+
+    PrometheusDistributionSummary(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig, double scale) {
+        super(id, clock,
+                DistributionStatisticConfig.builder()
+                        .percentilesHistogram(false)
+                        .sla()
+                        .build()
+                        .merge(distributionStatisticConfig),
+                scale, false);
+
+        this.max = new TimeWindowMax(clock, distributionStatisticConfig);
+
+        if (distributionStatisticConfig.isPublishingHistogram()) {
+            histogram = new TimeWindowFixedBoundaryHistogram(clock, DistributionStatisticConfig.builder()
+                    .expiry(Duration.ofDays(1825)) // effectively never roll over
+                    .bufferLength(1)
+                    .build()
+                    .merge(distributionStatisticConfig), true);
+        } else {
+            histogram = null;
+        }
     }
 
     @Override
@@ -50,7 +62,9 @@ public class PrometheusDistributionSummary extends AbstractDistributionSummary {
         count.increment();
         this.amount.add(amount);
         max.record(amount);
-        percentilesHistogram.recordDouble(amount);
+
+        if (histogram != null)
+            histogram.recordDouble(amount);
     }
 
     @Override
@@ -82,8 +96,26 @@ public class PrometheusDistributionSummary extends AbstractDistributionSummary {
     /**
      * For Prometheus we cannot use the histogram counts from HistogramSnapshot, as it is based on a
      * rolling histogram. Prometheus requires a histogram that accumulates values over the lifetime of the app.
+     *
+     * @return Cumulative histogram buckets.
      */
-    public CountAtValue[] percentileBuckets() {
-        return percentilesHistogram.takeSnapshot(0, 0, 0, true).histogramCounts();
+    public CountAtBucket[] histogramCounts() {
+        return histogram == null ? EMPTY_HISTOGRAM : histogram.takeSnapshot(0, 0, 0).histogramCounts();
+    }
+
+    @Override
+    public HistogramSnapshot takeSnapshot() {
+        HistogramSnapshot snapshot = super.takeSnapshot();
+
+        if (histogram == null) {
+            return snapshot;
+        }
+
+        return new HistogramSnapshot(snapshot.count(),
+                snapshot.total(),
+                snapshot.max(),
+                snapshot.percentileValues(),
+                histogramCounts(),
+                snapshot::outputSummary);
     }
 }

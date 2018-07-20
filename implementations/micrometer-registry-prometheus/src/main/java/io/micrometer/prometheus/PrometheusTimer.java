@@ -17,34 +17,45 @@ package io.micrometer.prometheus;
 
 import io.micrometer.core.instrument.AbstractTimer;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.CountAtValue;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.TimeWindowLatencyHistogram;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
-import io.micrometer.core.instrument.util.TimeDecayingMax;
+import io.micrometer.core.instrument.distribution.*;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.util.TimeUtils;
+import io.micrometer.core.lang.Nullable;
 
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
-public class PrometheusTimer extends AbstractTimer implements Timer {
+public class PrometheusTimer extends AbstractTimer {
+    private static final CountAtBucket[] EMPTY_HISTOGRAM = new CountAtBucket[0];
+
     private final LongAdder count = new LongAdder();
     private final LongAdder totalTime = new LongAdder();
-    private final TimeDecayingMax max;
-    private final TimeWindowLatencyHistogram percentilesHistogram;
+    private final TimeWindowMax max;
 
-    PrometheusTimer(Id id, Clock clock, HistogramConfig histogramConfig, PauseDetector pauseDetector) {
-        super(id, clock, histogramConfig, pauseDetector, TimeUnit.SECONDS);
-        this.max = new TimeDecayingMax(clock, histogramConfig);
+    @Nullable
+    private final Histogram histogram;
 
-        this.percentilesHistogram = new TimeWindowLatencyHistogram(clock,
-            HistogramConfig.builder()
-                .histogramExpiry(Duration.ofDays(1825)) // effectively never roll over
-                .histogramBufferLength(1)
-                .build()
-                .merge(histogramConfig), pauseDetector);
+    PrometheusTimer(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector) {
+        super(id, clock,
+                DistributionStatisticConfig.builder()
+                        .percentilesHistogram(false)
+                        .sla()
+                        .build()
+                        .merge(distributionStatisticConfig),
+                pauseDetector, TimeUnit.SECONDS, false);
+
+        this.max = new TimeWindowMax(clock, distributionStatisticConfig);
+
+        if (distributionStatisticConfig.isPublishingHistogram()) {
+            histogram = new TimeWindowFixedBoundaryHistogram(clock, DistributionStatisticConfig.builder()
+                    .expiry(Duration.ofDays(1825)) // effectively never roll over
+                    .bufferLength(1)
+                    .build()
+                    .merge(distributionStatisticConfig), true);
+        } else {
+            histogram = null;
+        }
     }
 
     @Override
@@ -52,8 +63,10 @@ public class PrometheusTimer extends AbstractTimer implements Timer {
         count.increment();
         long nanoAmount = TimeUnit.NANOSECONDS.convert(amount, unit);
         totalTime.add(nanoAmount);
-        percentilesHistogram.recordLong(nanoAmount);
         max.record(nanoAmount, TimeUnit.NANOSECONDS);
+
+        if (histogram != null)
+            histogram.recordLong(TimeUnit.NANOSECONDS.convert(amount, unit));
     }
 
     @Override
@@ -74,8 +87,26 @@ public class PrometheusTimer extends AbstractTimer implements Timer {
     /**
      * For Prometheus we cannot use the histogram counts from HistogramSnapshot, as it is based on a
      * rolling histogram. Prometheus requires a histogram that accumulates values over the lifetime of the app.
+     *
+     * @return Cumulative histogram buckets.
      */
-    public CountAtValue[] percentileBuckets() {
-        return percentilesHistogram.takeSnapshot(0, 0, 0, true).histogramCounts();
+    public CountAtBucket[] histogramCounts() {
+        return histogram == null ? EMPTY_HISTOGRAM : histogram.takeSnapshot(0, 0, 0).histogramCounts();
+    }
+
+    @Override
+    public HistogramSnapshot takeSnapshot() {
+        HistogramSnapshot snapshot = super.takeSnapshot();
+
+        if (histogram == null) {
+            return snapshot;
+        }
+
+        return new HistogramSnapshot(snapshot.count(),
+                snapshot.total(TimeUnit.SECONDS),
+                snapshot.max(TimeUnit.SECONDS),
+                snapshot.percentileValues(),
+                histogramCounts(),
+                snapshot::outputSummary);
     }
 }

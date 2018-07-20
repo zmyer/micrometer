@@ -17,28 +17,27 @@ package io.micrometer.statsd;
 
 import io.micrometer.core.instrument.AbstractTimer;
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.step.StepDouble;
 import io.micrometer.core.instrument.util.TimeUtils;
-import org.reactivestreams.Processor;
+import org.reactivestreams.Subscriber;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.DoubleAdder;
 import java.util.concurrent.atomic.LongAdder;
 
-public class StatsdTimer extends AbstractTimer implements Timer {
+public class StatsdTimer extends AbstractTimer {
     private final LongAdder count = new LongAdder();
     private final DoubleAdder totalTime = new DoubleAdder();
     private StepDouble max;
 
     private final StatsdLineBuilder lineBuilder;
-    private final Processor<String, String> publisher;
+    private final Subscriber<String> publisher;
 
-    StatsdTimer(Id id, StatsdLineBuilder lineBuilder, Processor<String, String> publisher, Clock clock,
-                HistogramConfig histogramConfig, PauseDetector pauseDetector, TimeUnit baseTimeUnit, long stepMillis) {
-        super(id, clock, histogramConfig, pauseDetector, baseTimeUnit);
+    StatsdTimer(Id id, StatsdLineBuilder lineBuilder, Subscriber<String> publisher, Clock clock,
+                DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector, TimeUnit baseTimeUnit, long stepMillis) {
+        super(id, clock, distributionStatisticConfig, pauseDetector, baseTimeUnit, false);
         this.max = new StepDouble(clock, stepMillis);
         this.lineBuilder = lineBuilder;
         this.publisher = publisher;

@@ -19,9 +19,9 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Target;
 
 /**
- * This is a feature that may still yet change before 1.0.0 GA.
+ * This is a feature that is experimental and may yield a breaking change in a minor release.
  */
-@Target({ElementType.METHOD, ElementType.TYPE})
+@Target({ElementType.METHOD, ElementType.TYPE, ElementType.CONSTRUCTOR})
 public @interface Incubating {
     String since();
 }

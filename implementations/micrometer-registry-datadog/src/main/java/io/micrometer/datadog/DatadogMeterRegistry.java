@@ -17,17 +17,17 @@ package io.micrometer.datadog;
 
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.step.StepMeterRegistry;
-import io.micrometer.core.instrument.util.DoubleFormat;
-import io.micrometer.core.instrument.util.MeterPartition;
+import io.micrometer.core.instrument.util.*;
 import io.micrometer.core.lang.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,8 +46,6 @@ import static java.util.stream.StreamSupport.stream;
  * @author Jon Schneider
  */
 public class DatadogMeterRegistry extends StepMeterRegistry {
-    private final URL postTimeSeriesEndpoint;
-
     private final Logger logger = LoggerFactory.getLogger(DatadogMeterRegistry.class);
     private final DatadogConfig config;
 
@@ -62,24 +60,21 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
 
     public DatadogMeterRegistry(DatadogConfig config, Clock clock, ThreadFactory threadFactory) {
         super(config, clock);
+        requireNonNull(config.apiKey());
 
         this.config().namingConvention(new DatadogNamingConvention());
 
-        try {
-            this.postTimeSeriesEndpoint = URI.create(config.uri() + "/api/v1/series?api_key=" + config.apiKey()).toURL();
-        } catch (MalformedURLException e) {
-            // not possible
-            throw new RuntimeException(e);
-        }
-
         this.config = config;
 
-        start(threadFactory);
+        if (config.enabled())
+            start(threadFactory);
     }
 
     @Override
     protected void publish() {
         Map<String, DatadogMetricMetadata> metadataToSend = new HashMap<>();
+
+        URL postTimeSeriesEndpoint = URIUtils.toURL(config.uri() + "/api/v1/series?api_key=" + config.apiKey());
 
         try {
             HttpURLConnection con = null;
@@ -89,8 +84,8 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
                     con = (HttpURLConnection) postTimeSeriesEndpoint.openConnection();
                     con.setConnectTimeout((int) config.connectTimeout().toMillis());
                     con.setReadTimeout((int) config.readTimeout().toMillis());
-                    con.setRequestMethod("POST");
-                    con.setRequestProperty("Content-Type", "application/json");
+                    con.setRequestMethod(HttpMethod.POST);
+                    con.setRequestProperty(HttpHeader.CONTENT_TYPE, MediaType.APPLICATION_JSON);
                     con.setDoOutput(true);
 
                     /*
@@ -105,19 +100,21 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
                     */
 
                     String body = "{\"series\":[" +
-                        batch.stream().flatMap(m -> {
-                            if (m instanceof Timer) {
-                                return writeTimer((Timer) m, metadataToSend);
-                            }
-                            if (m instanceof DistributionSummary) {
-                                return writeSummary((DistributionSummary) m, metadataToSend);
-                            }
-                            if (m instanceof FunctionTimer) {
-                                return writeTimer((FunctionTimer) m, metadataToSend);
-                            }
-                            return writeMeter(m, metadataToSend);
-                        }).collect(joining(",")) +
-                        "]}";
+                            batch.stream().flatMap(m -> {
+                                if (m instanceof Timer) {
+                                    return writeTimer((Timer) m, metadataToSend);
+                                }
+                                if (m instanceof DistributionSummary) {
+                                    return writeSummary((DistributionSummary) m, metadataToSend);
+                                }
+                                if (m instanceof FunctionTimer) {
+                                    return writeTimer((FunctionTimer) m, metadataToSend);
+                                }
+                                return writeMeter(m, metadataToSend);
+                            }).collect(joining(",")) +
+                            "]}";
+
+                    logger.debug(body);
 
                     try (OutputStream os = con.getOutputStream()) {
                         os.write(body.getBytes());
@@ -127,14 +124,13 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
                     int status = con.getResponseCode();
 
                     if (status >= 200 && status < 300) {
-                        logger.info("successfully sent " + batch.size() + " metrics to datadog");
+                        logger.info("successfully sent {} metrics to datadog", batch.size());
                     } else if (status >= 400) {
-                        try (InputStream in = con.getErrorStream()) {
-                            logger.error("failed to send metrics: " + new BufferedReader(new InputStreamReader(in))
-                                .lines().collect(joining("\n")));
+                        if (logger.isErrorEnabled()) {
+                            logger.error("failed to send metrics: {}", IOUtils.toString(con.getErrorStream()));
                         }
                     } else {
-                        logger.error("failed to send metrics: http " + status);
+                        logger.error("failed to send metrics: http {}", status);
                     }
                 } finally {
                     quietlyCloseUrlConnection(con);
@@ -167,59 +163,43 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
 
         // we can't know anything about max and percentiles originating from a function timer
         return Stream.of(
-            writeMetric(id, "count", wallTime, timer.count()),
-            writeMetric(id, "avg", wallTime, timer.mean(getBaseTimeUnit())),
-            writeMetric(id, "sum", wallTime, timer.totalTime(getBaseTimeUnit())));
+                writeMetric(id, "count", wallTime, timer.count()),
+                writeMetric(id, "avg", wallTime, timer.mean(getBaseTimeUnit())),
+                writeMetric(id, "sum", wallTime, timer.totalTime(getBaseTimeUnit())));
     }
 
     private Stream<String> writeTimer(Timer timer, Map<String, DatadogMetricMetadata> metadata) {
         final long wallTime = clock.wallTime();
-        final HistogramSnapshot snapshot = timer.takeSnapshot(false);
         final Stream.Builder<String> metrics = Stream.builder();
 
         Meter.Id id = timer.getId();
-        metrics.add(writeMetric(id, "sum", wallTime, snapshot.total(getBaseTimeUnit())));
-        metrics.add(writeMetric(id, "count", wallTime, snapshot.count()));
-        metrics.add(writeMetric(id, "avg", wallTime, snapshot.mean(getBaseTimeUnit())));
-        metrics.add(writeMetric(id, "max", wallTime, snapshot.max(getBaseTimeUnit())));
+        metrics.add(writeMetric(id, "sum", wallTime, timer.totalTime(getBaseTimeUnit())));
+        metrics.add(writeMetric(id, "count", wallTime, timer.count()));
+        metrics.add(writeMetric(id, "avg", wallTime, timer.mean(getBaseTimeUnit())));
+        metrics.add(writeMetric(id, "max", wallTime, timer.max(getBaseTimeUnit())));
 
         addToMetadataList(metadata, id, "sum", Statistic.TOTAL_TIME, null);
         addToMetadataList(metadata, id, "count", Statistic.COUNT, "occurrence");
         addToMetadataList(metadata, id, "avg", Statistic.VALUE, null);
         addToMetadataList(metadata, id, "max", Statistic.MAX, null);
 
-        for (ValueAtPercentile v : snapshot.percentileValues()) {
-            String suffix = DoubleFormat.toString(v.percentile() * 100) + "percentile";
-            metrics.add(writeMetric(id, suffix, wallTime, v.value(getBaseTimeUnit())));
-
-            addToMetadataList(metadata, id, suffix, Statistic.VALUE, null);
-        }
-
         return metrics.build();
     }
 
     private Stream<String> writeSummary(DistributionSummary summary, Map<String, DatadogMetricMetadata> metadata) {
         final long wallTime = clock.wallTime();
-        final HistogramSnapshot snapshot = summary.takeSnapshot(false);
         final Stream.Builder<String> metrics = Stream.builder();
 
         Meter.Id id = summary.getId();
-        metrics.add(writeMetric(id, "sum", wallTime, snapshot.total()));
-        metrics.add(writeMetric(id, "count", wallTime, snapshot.count()));
-        metrics.add(writeMetric(id, "avg", wallTime, snapshot.mean()));
-        metrics.add(writeMetric(id, "max", wallTime, snapshot.max()));
+        metrics.add(writeMetric(id, "sum", wallTime, summary.totalAmount()));
+        metrics.add(writeMetric(id, "count", wallTime, summary.count()));
+        metrics.add(writeMetric(id, "avg", wallTime, summary.mean()));
+        metrics.add(writeMetric(id, "max", wallTime, summary.max()));
 
         addToMetadataList(metadata, id, "sum", Statistic.TOTAL, null);
         addToMetadataList(metadata, id, "count", Statistic.COUNT, "occurrence");
         addToMetadataList(metadata, id, "avg", Statistic.VALUE, null);
         addToMetadataList(metadata, id, "max", Statistic.MAX, null);
-
-        for (ValueAtPercentile v : snapshot.percentileValues()) {
-            String suffix = DoubleFormat.toString(v.percentile() * 100) + "percentile";
-            metrics.add(writeMetric(id, suffix, wallTime, v.value()));
-
-            addToMetadataList(metadata, id, suffix, Statistic.VALUE, null);
-        }
 
         return metrics.build();
     }
@@ -227,11 +207,11 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
     private Stream<String> writeMeter(Meter m, Map<String, DatadogMetricMetadata> metadata) {
         long wallTime = clock.wallTime();
         return stream(m.measure().spliterator(), false)
-            .map(ms -> {
-                Meter.Id id = m.getId().withTag(ms.getStatistic());
-                addToMetadataList(metadata, id, null, ms.getStatistic(), null);
-                return writeMetric(id, null, wallTime, ms.getValue());
-            });
+                .map(ms -> {
+                    Meter.Id id = m.getId().withTag(ms.getStatistic());
+                    addToMetadataList(metadata, id, null, ms.getStatistic(), null);
+                    return writeMetric(id, null, wallTime, ms.getValue());
+                });
     }
 
     private void addToMetadataList(Map<String, DatadogMetricMetadata> metadata, Meter.Id id, @Nullable String suffix,
@@ -255,22 +235,22 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
         if (suffix != null)
             fullId = idWithSuffix(id, suffix);
 
-        Iterable<Tag> tags = fullId.getTags();
+        Iterable<Tag> tags = getConventionTags(fullId);
 
         String host = config.hostTag() == null ? "" : stream(tags.spliterator(), false)
-            .filter(t -> requireNonNull(config.hostTag()).equals(t.getKey()))
-            .findAny()
-            .map(t -> ",\"host\":\"" + t.getValue() + "\"")
-            .orElse("");
+                .filter(t -> requireNonNull(config.hostTag()).equals(t.getKey()))
+                .findAny()
+                .map(t -> ",\"host\":\"" + t.getValue() + "\"")
+                .orElse("");
 
         String tagsArray = tags.iterator().hasNext() ?
-            ",\"tags\":[" +
-                stream(tags.spliterator(), false)
-                    .map(t -> "\"" + t.getKey() + ":" + t.getValue() + "\"")
-                    .collect(joining(",")) + "]" : "";
+                ",\"tags\":[" +
+                        stream(tags.spliterator(), false)
+                                .map(t -> "\"" + t.getKey() + ":" + t.getValue() + "\"")
+                                .collect(joining(",")) + "]" : "";
 
         return "{\"metric\":\"" + getConventionName(fullId) + "\"," +
-            "\"points\":[[" + (wallTime / 1000) + ", " + value + "]]" + host + tagsArray + "}";
+                "\"points\":[[" + (wallTime / 1000) + ", " + value + "]]" + host + tagsArray + "}";
     }
 
     /**
@@ -283,12 +263,12 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
 
         HttpURLConnection con = null;
         try {
-            con = (HttpURLConnection) URI.create(config.uri() + "/api/v1/metrics/" + metricName
-                + "?api_key=" + config.apiKey() + "&application_key=" + config.applicationKey()).toURL().openConnection();
+            con = (HttpURLConnection) URI.create(config.uri() + "/api/v1/metrics/" + URLEncoder.encode(metricName, "UTF-8")
+                    + "?api_key=" + config.apiKey() + "&application_key=" + config.applicationKey()).toURL().openConnection();
             con.setConnectTimeout((int) config.connectTimeout().toMillis());
             con.setReadTimeout((int) config.readTimeout().toMillis());
-            con.setRequestMethod("PUT");
-            con.setRequestProperty("Content-Type", "application/json");
+            con.setRequestMethod(HttpMethod.PUT);
+            con.setRequestProperty(HttpHeader.CONTENT_TYPE, MediaType.APPLICATION_JSON);
             con.setDoOutput(true);
 
             try (OutputStream os = con.getOutputStream()) {
@@ -301,19 +281,17 @@ public class DatadogMeterRegistry extends StepMeterRegistry {
             if (status >= 200 && status < 300) {
                 verifiedMetadata.add(metricName);
             } else if (status >= 400) {
-                try (InputStream in = con.getErrorStream()) {
-                    String msg = new BufferedReader(new InputStreamReader(in))
-                        .lines().collect(joining("\n"));
-                    if (msg.contains("metric_name not found")) {
-                        // Do nothing. Metrics that are newly created in Datadog are not immediately available
-                        // for metadata modification. We will keep trying this request on subsequent publishes,
-                        // where it will eventually succeed.
-                    } else {
-                        logger.error("failed to send metric metadata: " + msg);
-                    }
+                String msg = IOUtils.toString(con.getErrorStream());
+
+                // Ignore when the response content contains "metric_name not found".
+                // Metrics that are newly created in Datadog are not immediately available
+                // for metadata modification. We will keep trying this request on subsequent publishes,
+                // where it will eventually succeed.
+                if (!msg.contains("metric_name not found")) {
+                    logger.error("failed to send metric metadata: {}", msg);
                 }
             } else {
-                logger.error("failed to send metric metadata: http " + status);
+                logger.error("failed to send metric metadata: http {}", status);
             }
         } catch (IOException e) {
             logger.warn("failed to send metric metadata", e);

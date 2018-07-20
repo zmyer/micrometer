@@ -29,6 +29,9 @@ import io.micrometer.core.lang.NonNullFields;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Marker;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import static java.util.Collections.emptyList;
 
 /**
@@ -36,21 +39,50 @@ import static java.util.Collections.emptyList;
  */
 @NonNullApi
 @NonNullFields
-public class LogbackMetrics implements MeterBinder {
+public class LogbackMetrics implements MeterBinder, AutoCloseable {
+    static ThreadLocal<Boolean> ignoreMetrics = new ThreadLocal<>();
+
     private final Iterable<Tag> tags;
+    private final LoggerContext loggerContext;
+    private final Map<MeterRegistry, MetricsTurboFilter> metricsTurboFilters = new ConcurrentHashMap<>();
 
     public LogbackMetrics() {
         this(emptyList());
     }
 
     public LogbackMetrics(Iterable<Tag> tags) {
+        this(tags, (LoggerContext) LoggerFactory.getILoggerFactory());
+    }
+
+    public LogbackMetrics(Iterable<Tag> tags, LoggerContext context) {
         this.tags = tags;
+        this.loggerContext = context;
     }
 
     @Override
     public void bindTo(MeterRegistry registry) {
-        LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
-        context.addTurboFilter(new MetricsTurboFilter(registry, tags));
+        MetricsTurboFilter filter = new MetricsTurboFilter(registry, tags);
+        metricsTurboFilters.put(registry, filter);
+        loggerContext.addTurboFilter(filter);
+    }
+
+    /**
+     * Used by {@link Counter#increment()} implementations that may cause a logback logging event to occur.
+     * Attempting to instrument that implementation would cause a {@link StackOverflowError}.
+     *
+     * @param r Don't record metrics on logging statements that occur inside of this runnable.
+     */
+    public static void ignoreMetrics(Runnable r) {
+        ignoreMetrics.set(true);
+        r.run();
+        ignoreMetrics.remove();
+    }
+
+    @Override
+    public void close() {
+        for (MetricsTurboFilter metricsTurboFilter : metricsTurboFilters.values()) {
+            loggerContext.getTurboFilterList().remove(metricsTurboFilter);
+        }
     }
 }
 
@@ -92,6 +124,11 @@ class MetricsTurboFilter extends TurboFilter {
 
     @Override
     public FilterReply decide(Marker marker, Logger logger, Level level, String format, Object[] params, Throwable t) {
+        Boolean ignored = LogbackMetrics.ignoreMetrics.get();
+        if (ignored != null && ignored) {
+            return FilterReply.NEUTRAL;
+        }
+
         // cannot use logger.isEnabledFor(level), as it would cause a StackOverflowError by calling this filter again!
         if (level.isGreaterOrEqual(logger.getEffectiveLevel()) && format != null) {
             switch (level.toInt()) {

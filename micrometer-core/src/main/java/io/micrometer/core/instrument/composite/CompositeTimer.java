@@ -16,11 +16,11 @@
 package io.micrometer.core.instrument.composite;
 
 import io.micrometer.core.instrument.Clock;
-import io.micrometer.core.instrument.HistogramSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.histogram.HistogramConfig;
-import io.micrometer.core.instrument.histogram.pause.PauseDetector;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.core.instrument.distribution.HistogramSnapshot;
+import io.micrometer.core.instrument.distribution.pause.PauseDetector;
 import io.micrometer.core.instrument.noop.NoopTimer;
 
 import java.time.Duration;
@@ -30,13 +30,13 @@ import java.util.function.Supplier;
 
 class CompositeTimer extends AbstractCompositeMeter<Timer> implements Timer {
     private final Clock clock;
-    private final HistogramConfig histogramConfig;
+    private final DistributionStatisticConfig distributionStatisticConfig;
     private final PauseDetector pauseDetector;
 
-    CompositeTimer(Id id, Clock clock, HistogramConfig histogramConfig, PauseDetector pauseDetector) {
+    CompositeTimer(Id id, Clock clock, DistributionStatisticConfig distributionStatisticConfig, PauseDetector pauseDetector) {
         super(id);
         this.clock = clock;
-        this.histogramConfig = histogramConfig;
+        this.distributionStatisticConfig = distributionStatisticConfig;
         this.pauseDetector = pauseDetector;
     }
 
@@ -99,18 +99,8 @@ class CompositeTimer extends AbstractCompositeMeter<Timer> implements Timer {
     }
 
     @Override
-    public double percentile(double percentile, TimeUnit unit) {
-        return firstChild().percentile(percentile, unit);
-    }
-
-    @Override
-    public double histogramCountAtValue(long valueNanos) {
-        return firstChild().histogramCountAtValue(valueNanos);
-    }
-
-    @Override
-    public HistogramSnapshot takeSnapshot(boolean supportsAggregablePercentiles) {
-        return firstChild().takeSnapshot(supportsAggregablePercentiles);
+    public HistogramSnapshot takeSnapshot() {
+        return firstChild().takeSnapshot();
     }
 
     @Override
@@ -126,27 +116,27 @@ class CompositeTimer extends AbstractCompositeMeter<Timer> implements Timer {
     @SuppressWarnings("ConstantConditions")
     @Override
     Timer registerNewMeter(MeterRegistry registry) {
-        final long[] slaNanos = histogramConfig.getSlaBoundaries();
+        Timer.Builder builder = Timer.builder(getId().getName())
+                .tags(getId().getTags())
+                .description(getId().getDescription())
+                .maximumExpectedValue(Duration.ofNanos(distributionStatisticConfig.getMaximumExpectedValue()))
+                .minimumExpectedValue(Duration.ofNanos(distributionStatisticConfig.getMinimumExpectedValue()))
+                .publishPercentiles(distributionStatisticConfig.getPercentiles())
+                .publishPercentileHistogram(distributionStatisticConfig.isPercentileHistogram())
+                .distributionStatisticBufferLength(distributionStatisticConfig.getBufferLength())
+                .distributionStatisticExpiry(distributionStatisticConfig.getExpiry())
+                .percentilePrecision(distributionStatisticConfig.getPercentilePrecision())
+                .pauseDetector(pauseDetector);
 
-        Duration[] sla = null;
+        final long[] slaNanos = distributionStatisticConfig.getSlaBoundaries();
         if (slaNanos != null) {
-            sla = new Duration[slaNanos.length];
+            Duration[] sla = new Duration[slaNanos.length];
             for (int i = 0; i < slaNanos.length; i++) {
                 sla[i] = Duration.ofNanos(slaNanos[i]);
             }
+            builder = builder.sla(sla);
         }
 
-        return Timer.builder(getId().getName())
-            .tags(getId().getTags())
-            .description(getId().getDescription())
-            .maximumExpectedValue(Duration.ofNanos(histogramConfig.getMaximumExpectedValue()))
-            .minimumExpectedValue(Duration.ofNanos(histogramConfig.getMinimumExpectedValue()))
-            .publishPercentiles(histogramConfig.getPercentiles())
-            .publishPercentileHistogram(histogramConfig.isPercentileHistogram())
-            .histogramBufferLength(histogramConfig.getHistogramBufferLength())
-            .histogramExpiry(histogramConfig.getHistogramExpiry())
-            .sla(sla)
-            .pauseDetector(pauseDetector)
-            .register(registry);
+        return builder.register(registry);
     }
 }

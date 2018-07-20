@@ -15,6 +15,7 @@
  */
 package io.micrometer.spring.web.client;
 
+import io.micrometer.core.Issue;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.MockClock;
 import io.micrometer.core.instrument.Tag;
@@ -29,7 +30,9 @@ import org.springframework.test.web.client.match.MockRestRequestMatchers;
 import org.springframework.test.web.client.response.MockRestResponseCreators;
 import org.springframework.web.client.RestTemplate;
 
-import static java.util.stream.StreamSupport.stream;
+import java.net.URI;
+import java.net.URISyntaxException;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -46,46 +49,59 @@ public class MetricsRestTemplateCustomizerTest {
     @Before
     public void before() {
         MetricsRestTemplateCustomizer customizer = new MetricsRestTemplateCustomizer(
-            registry, new DefaultRestTemplateExchangeTagsProvider(), "http.client.requests");
+                registry, new DefaultRestTemplateExchangeTagsProvider(), "http.client.requests");
         customizer.customize(restTemplate);
     }
 
     @Test
     public void interceptRestTemplate() {
         mockServer.expect(MockRestRequestMatchers.requestTo("/test/123"))
-            .andExpect(MockRestRequestMatchers.method(HttpMethod.GET))
-            .andRespond(MockRestResponseCreators.withSuccess("OK",
-                MediaType.APPLICATION_JSON));
+                .andExpect(MockRestRequestMatchers.method(HttpMethod.GET))
+                .andRespond(MockRestResponseCreators.withSuccess("OK",
+                        MediaType.APPLICATION_JSON));
 
         String result = restTemplate.getForObject("/test/{id}", String.class, 123);
 
         assertThat(registry.get("http.client.requests").meters())
-            .anySatisfy(m -> assertThat(stream(m.getId().getTags().spliterator(), false).map(Tag::getKey)).doesNotContain("bucket"));
+                .anySatisfy(m -> assertThat(m.getId().getTags().stream().map(Tag::getKey)).doesNotContain("bucket"));
 
         assertThat(registry.get("http.client.requests")
-            .tags("method", "GET", "uri", "/test/{id}", "status", "200")
-            .timer().count()).isEqualTo(1L);
+                .tags("method", "GET", "uri", "/test/{id}", "status", "200")
+                .timer().count()).isEqualTo(1L);
 
         assertThat(result).isEqualTo("OK");
 
         mockServer.verify();
     }
 
-    /**
-     * Issue #283
-     */
+    @Issue("#283")
     @Test
     public void normalizeUriToContainLeadingSlash() {
         mockServer.expect(MockRestRequestMatchers.requestTo("test/123"))
-            .andExpect(MockRestRequestMatchers.method(HttpMethod.GET))
-            .andRespond(MockRestResponseCreators.withSuccess("OK",
-                MediaType.APPLICATION_JSON));
+                .andExpect(MockRestRequestMatchers.method(HttpMethod.GET))
+                .andRespond(MockRestResponseCreators.withSuccess("OK",
+                        MediaType.APPLICATION_JSON));
 
         String result = restTemplate.getForObject("test/{id}", String.class, 123);
 
-        assertThat(registry.find("http.client.requests").tags("uri", "/test/{id}").timer())
-            .isNotNull();
+        registry.get("http.client.requests").tags("uri", "/test/{id}").timer();
         assertThat(result).isEqualTo("OK");
+
+        mockServer.verify();
+    }
+
+    @Test
+    public void interceptRestTemplateWithUri() throws URISyntaxException {
+        mockServer.expect(MockRestRequestMatchers.requestTo("http://localhost/test/123"))
+                .andExpect(MockRestRequestMatchers.method(HttpMethod.GET))
+                .andRespond(MockRestResponseCreators.withSuccess("OK",
+                        MediaType.APPLICATION_JSON));
+
+        String result = restTemplate.getForObject(new URI("http://localhost/test/123"), String.class);
+
+        assertThat(result).isEqualTo("OK");
+
+        registry.get("http.client.requests").tags("uri", "/test/123").timer();
 
         mockServer.verify();
     }

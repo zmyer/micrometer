@@ -11,7 +11,12 @@ include 'micrometer-jersey2'
 
 include 'micrometer-test'
 
-['atlas', 'prometheus', 'datadog', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx'].each { sys ->
+['atlas', 'prometheus', 'datadog', 'elastic', 'ganglia', 'graphite', 'jmx', 'influx', 'statsd', 'new-relic', 'cloudwatch', 'signalfx', 'wavefront', 'dynatrace'].each { sys ->
     include "micrometer-registry-$sys"
     project(":micrometer-registry-$sys").projectDir = new File(rootProject.projectDir, "implementations/micrometer-registry-$sys")
+}
+
+['core'].each { benchmark ->
+    include "micrometer-benchmarks-$benchmark"
+    project(":micrometer-benchmarks-$benchmark").projectDir = new File(rootProject.projectDir, "benchmarks/benchmarks-$benchmark")
 }
